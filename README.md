@@ -45,7 +45,7 @@ The Mac's output menu (menu bar › Sound) stays the switch while Sfera runs. Ch
 
 With AirPods, turn their own **Spatial Audio** off so the sound isn't processed twice.
 
-Requires macOS 15+ and a Swift 6 toolchain (Command Line Tools are enough). The bundled build is Apple Silicon and ad-hoc signed (not notarized).
+Requires macOS 15+ and a Swift 6 toolchain (Command Line Tools are enough). The bundled build is Apple Silicon and not notarized. `Scripts/package_app.sh` signs it with your Apple Development (or Developer ID) certificate when one is in the keychain, so macOS keeps Sfera's microphone and audio-recording permissions across rebuilds; otherwise it signs ad hoc, and macOS asks again after every rebuild. `SIGN_IDENTITY` picks a certificate (`-` forces ad hoc).
 
 ## What changed in 1.0
 

@@ -14,6 +14,9 @@ import ServiceManagement
 ///
 /// Event-driven: Core Audio listeners for the default output, the device list and rates.
 /// The only timer is a 1 Hz watchdog while listening (and the meters while the panel is open).
+///
+/// Sessions are built and torn down on a background queue: Core Audio can block for minutes
+/// while macOS shows a permission prompt, and the menu bar (and Quit) must keep working.
 @MainActor
 @Observable
 final class Controller {
@@ -80,6 +83,24 @@ final class Controller {
     @ObservationIgnored private var lastAudio = Date.distantPast
     @ObservationIgnored private var startedAt = Date.distantPast
     @ObservationIgnored private var restarting = false
+    /// Builds and tears down sessions, in order, off the main thread.
+    @ObservationIgnored private let routing = DispatchQueue(label: "dev.sfera.routing", qos: .userInitiated)
+    /// Bumped by every teardown; a session that finishes opening for an older one is discarded.
+    @ObservationIgnored private var generation = 0
+    /// A session is being built on `routing`.
+    @ObservationIgnored private var opening = false
+    @ObservationIgnored private var openingSince = Date.distantPast
+    /// The Mac's output changed while a session was opening; re-check once it's open.
+    @ObservationIgnored private var outputChangedWhileOpening = false
+    /// Opening has taken more than a few seconds (usually a permission prompt).
+    private(set) var openingSlow = false
+    /// The watchdog stopped a dead session and is waiting to try again.
+    private(set) var waitingToRetry = false
+    @ObservationIgnored private var nextAttempt = Date.distantPast
+    /// Consecutive watchdog restarts without a healthy session in between.
+    @ObservationIgnored private var watchdogRestarts = 0
+    /// Waits before each watchdog retry; after the last one Sfera stops and says why.
+    static let retryDelays: [TimeInterval] = [3, 10, 30]
     @ObservationIgnored private var lastStatusLog = Date.distantPast
     @ObservationIgnored private var persisting = true
 
@@ -120,12 +141,20 @@ final class Controller {
         if listenOnLaunch { start() } else { restoreMacOutput() }   // e.g. after a crash on BlackHole
     }
 
-    /// App is quitting: hand the Mac's output back.
-    func shutdown() { stop() }
+    /// App is quitting: hand the Mac's output back, and give the session up to 2 s to close.
+    func shutdown() {
+        stop()
+        let closed = DispatchSemaphore(value: 0)
+        routing.async { closed.signal() }
+        _ = closed.wait(timeout: .now() + 2)
+    }
 
     // MARK: - Commands
 
-    func setOn(_ on: Bool) { on ? start() : stop() }
+    func setOn(_ on: Bool) {
+        watchdogRestarts = 0
+        on ? start() : stop()
+    }
 
     func toggleSpatial() { settings.spatial.toggle() }
 
@@ -150,7 +179,10 @@ final class Controller {
     var detail: String {
         guard wantsOn else { return "Turn on to spatialise everything you play" }
         guard route != .none else {
-            return awaitingPermission ? "macOS counts BlackHole as a microphone. Nothing is recorded." : "Connecting to your output…"
+            if awaitingPermission { return "macOS counts BlackHole as a microphone. Nothing is recorded." }
+            if waitingToRetry { return "Audio stopped on \(outputName ?? "your output") · trying again" }
+            if openingSlow { return "Waiting for macOS · if a permission prompt is open, answer it" }
+            return "Connecting to your output…"
         }
         if !receiving {
             if route == .tap, !everReceived, Date().timeIntervalSince(startedAt) > 8 {
@@ -186,6 +218,7 @@ final class Controller {
     func start() {
         wantsOn = true
         errorMessage = nil
+        waitingToRetry = false
         loopbackName = Devices.loopback().map(Devices.name)
         if useLoopback, !loopbackDeclined, let loop = Devices.loopback() {
             startLoopback(loop)
@@ -198,6 +231,8 @@ final class Controller {
     func stop() {
         wantsOn = false
         loopbackDeclined = false
+        waitingToRetry = false
+        watchdogRestarts = 0
         teardown()
         restoreMacOutput()
         scheduleTimer()
@@ -211,8 +246,13 @@ final class Controller {
     }
 
     private func teardown() {
-        session?.stop()
-        session = nil
+        generation += 1
+        opening = false
+        openingSlow = false
+        if let old = session {
+            session = nil
+            routing.async { old.stop() }
+        }
         routeListeners = []
         route = .none
         receiving = false
@@ -253,23 +293,7 @@ final class Controller {
             UserDefaults.standard.set(uid, forKey: Key.restore)
         }
         if Devices.defaultOutput() != loop { Devices.setDefaultOutput(loop) }
-        do {
-            session = try Session(source: .loopback(loop), output: out, settings: settings)
-        } catch {
-            Log.write("BlackHole route failed (\(Devices.name(out))): \(error.localizedDescription); falling back to stereo")
-            startTap()
-            return
-        }
-        if !restarting {
-            Devices.setVolume(Self.loopbackStartVolume, unmute: loop)
-        }
-        route = .loopback
-        began(output: out)
-        routeListeners += [
-            Devices.onRateChange(loop) { [weak self] in Task { @MainActor in self?.rateChanged() } },
-        ].compactMap { $0 }
-        Log.write(String(format: "BlackHole route: %@ → %@ at %.0f Hz, %d channels",
-                         Devices.name(loop), Devices.name(out), session?.sampleRate ?? 0, session?.channels ?? 0))
+        open(.loopback(loop, output: out, setVolume: !restarting))
     }
 
     /// Stereo: tap every app except Sfera and play to the real output.
@@ -284,17 +308,70 @@ final class Controller {
             return
         }
         if Devices.defaultOutput() != target { Devices.setDefaultOutput(target) }
-        do {
-            session = try Session(source: .tap, output: target, settings: settings)
-        } catch {
+        open(.tap(output: target))
+    }
+
+    private enum Opening: Sendable {
+        case loopback(AudioDeviceID, output: AudioDeviceID, setVolume: Bool)
+        case tap(output: AudioDeviceID)
+    }
+
+    /// Builds the session on `routing`, then finishes on the main actor.
+    private func open(_ what: Opening) {
+        generation += 1
+        let generation = self.generation
+        opening = true
+        openingSince = Date()
+        outputChangedWhileOpening = false
+        let settings = self.settings
+        routing.async { [weak self] in
+            let result = Result<Session, any Error> {
+                switch what {
+                case .loopback(let loop, let out, _): try Session(source: .loopback(loop), output: out, settings: settings)
+                case .tap(let out): try Session(source: .tap, output: out, settings: settings)
+                }
+            }
+            Task { @MainActor in self?.opened(what, result, generation: generation) }
+        }
+    }
+
+    private func opened(_ what: Opening, _ result: Result<Session, any Error>, generation: Int) {
+        guard generation == self.generation, wantsOn else {
+            // Stopped or rerouted while this one was opening.
+            if case .success(let stale) = result { routing.async { stale.stop() } }
+            return
+        }
+        opening = false
+        openingSlow = false
+        switch (what, result) {
+        case (.loopback(_, let out, _), .failure(let error)):
+            Log.write("BlackHole route failed (\(Devices.name(out))): \(error.localizedDescription); falling back to stereo")
+            startTap()
+        case (.tap, .failure(let error)):
             Log.write("tap route failed: \(error.localizedDescription)")
             errorMessage = "Sfera couldn't start: \(error.localizedDescription) Allow Sfera under Privacy & Security › Screen & System Audio Recording."
             wantsOn = false
-            return
+            scheduleTimer()
+        case (.loopback(let loop, let out, let setVolume), .success(let session)):
+            self.session = session
+            session.update(settings)
+            if setVolume { Devices.setVolume(Self.loopbackStartVolume, unmute: loop) }
+            route = .loopback
+            began(output: out)
+            routeListeners += [
+                Devices.onRateChange(loop) { [weak self] in Task { @MainActor in self?.rateChanged() } },
+            ].compactMap { $0 }
+            Log.write(String(format: "BlackHole route: %@ → %@ at %.0f Hz, %d channels",
+                             Devices.name(loop), Devices.name(out), session.sampleRate, session.channels))
+            if outputChangedWhileOpening { defaultOutputChanged() }
+        case (.tap(let target), .success(let session)):
+            self.session = session
+            session.update(settings)
+            route = .tap
+            began(output: target)
+            Log.write("tap route → \(Devices.name(target)) at \(Int(session.sampleRate)) Hz")
+            if outputChangedWhileOpening { defaultOutputChanged() }
         }
-        route = .tap
-        began(output: target)
-        Log.write("tap route → \(Devices.name(target)) at \(Int(session?.sampleRate ?? 0)) Hz")
     }
 
     private func began(output: AudioDeviceID) {
@@ -341,6 +418,7 @@ final class Controller {
     /// - BlackHole chosen while on stereo → surround again;
     /// - on stereo, another real device → follow it.
     private func defaultOutputChanged() {
+        if opening { outputChangedWhileOpening = true; return }
         guard wantsOn, let session, let now = Devices.defaultOutput() else { return }
         let nowIsLoopback = Devices.isLoopback(now)
         switch route {
@@ -369,7 +447,10 @@ final class Controller {
     private func deviceListChanged() {
         loopbackName = Devices.loopback().map(Devices.name)
         guard wantsOn else { return }
-        guard let session else { start(); return }
+        guard let session else {
+            if !opening, !waitingToRetry { start() }
+            return
+        }
         if !Devices.all().contains(session.output) || !Devices.isAlive(session.output) {
             Log.write("output device went away; restarting")
             restart()
@@ -409,8 +490,17 @@ final class Controller {
     private func tick() {
         guard wantsOn else { return }
         guard let session else {
-            // Retry a failed start every few seconds (e.g. right after a device change).
-            if !awaitingPermission, Date().timeIntervalSince(startedAt) > 3 { startedAt = Date(); start() }
+            if opening {
+                let slow = Date().timeIntervalSince(openingSince) > 5
+                if slow != openingSlow { openingSlow = slow }
+                return
+            }
+            // Retry a failed start every few seconds (e.g. right after a device change), or
+            // after the watchdog's back-off.
+            if !awaitingPermission, Date() >= nextAttempt {
+                nextAttempt = Date().addingTimeInterval(3)
+                start()
+            }
             return
         }
         let sp = session.spatializer
@@ -434,11 +524,32 @@ final class Controller {
             let callbacks = session.callbacks
             stalledTicks = callbacks == lastCallbacks ? stalledTicks + 1 : 0
             lastCallbacks = callbacks
-            if stalledTicks >= 3, now.timeIntervalSince(startedAt) > 3 {
-                Log.write("audio stopped on \(outputName ?? "output"); restarting")
-                restart()
-            }
+            if stalledTicks == 0, now.timeIntervalSince(startedAt) > 10 { watchdogRestarts = 0 }
+            if stalledTicks >= 3, now.timeIntervalSince(startedAt) > 3 { audioStopped(neverStarted: callbacks == 0) }
         }
+    }
+
+    /// The IOProc stopped (or never ran). Back off between retries instead of rebuilding the
+    /// route every few seconds forever, and after the last retry stop and say why.
+    private func audioStopped(neverStarted: Bool) {
+        let name = outputName ?? "output"
+        let wasTap = route == .tap
+        watchdogRestarts += 1
+        teardown()
+        // Let the Mac play directly meanwhile (it's silent while left on BlackHole).
+        restoreMacOutput()
+        guard watchdogRestarts <= Self.retryDelays.count else {
+            Log.write("audio stopped on \(name) again\(neverStarted ? " (no audio ever arrived)" : ""); giving up after \(Self.retryDelays.count) retries")
+            stop()
+            errorMessage = wasTap && neverStarted
+                ? "macOS isn't sending system audio to Sfera. If you just allowed it under Privacy & Security, quit and reopen Sfera."
+                : "Audio stopped on \(name) and didn't come back. Turn Sfera on to try again."
+            return
+        }
+        let delay = Self.retryDelays[watchdogRestarts - 1]
+        Log.write("audio stopped on \(name)\(neverStarted ? " (no audio ever arrived)" : ""); retry \(watchdogRestarts) of \(Self.retryDelays.count) in \(Int(delay)) s")
+        nextAttempt = Date().addingTimeInterval(delay)
+        waitingToRetry = true
     }
 
     // MARK: - Login item

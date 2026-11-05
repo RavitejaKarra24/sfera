@@ -56,8 +56,18 @@ cat > "$APP/Contents/Info.plist" <<PLIST
 </plist>
 PLIST
 
-echo "▸ signing (ad hoc)"
-codesign --force --deep --sign - "$APP" >/dev/null 2>&1 || echo "  (codesign skipped)"
+# Sign with a stable identity when there is one. macOS ties privacy permissions (microphone
+# for BlackHole, Screen & System Audio Recording for the tap) to the signature. An ad-hoc
+# signature changes with every build, so after a rebuild macOS asks again and, until it's
+# answered, Core Audio stalls. SIGN_IDENTITY overrides the choice; SIGN_IDENTITY=- forces ad hoc.
+IDENTITY="${SIGN_IDENTITY:-$(security find-identity -v -p codesigning 2>/dev/null \
+  | awk -F'"' '/"(Apple Development|Developer ID Application): / { print $2; exit }')}"
+if [ -n "$IDENTITY" ] && [ "$IDENTITY" != "-" ] && codesign --force --timestamp=none --sign "$IDENTITY" "$APP"; then
+  echo "▸ signed: $IDENTITY (permissions carry over between builds)"
+else
+  codesign --force --sign - "$APP"
+  echo "▸ signed ad hoc: macOS will ask for permissions again after every rebuild"
+fi
 
 echo "✓ built $APP"
 du -sh "$APP"
