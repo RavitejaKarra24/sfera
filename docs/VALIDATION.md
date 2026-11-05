@@ -25,7 +25,34 @@ Every comparison in the bench fails on any non-finite sample, and a failed build
 
 **Known defect: limiter release stalls at −0.002 dB.** After a limited burst, quiet material comes out 0.99977× (−0.002 dB) for good. The release rebuilds its distance to unity from the rounded Float gain every sample, so it stalls where one step is smaller than half a Float ULP, at 1 − 2.3·10⁻⁴. That is 0.9's stall, and the comment in `Limiter.process` claiming otherwise is wrong. The bench reports it as a known defect (⚠, not a failure) and will say when it passes. The amount is far below audibility.
 
-## 3. Same output as 0.9
+## 3. Refined renderer and switching
+
+`Bench/run.sh --refined` runs the Classic gate plus these; the full bench runs them too. Values from 2026-11-05.
+
+| Check | Classic | Refined |
+|---|---|---|
+| ITD model at 0° / 90° / 135° / 180° | 0 / 0.656 / 0.781 / 0.000 ms | 0 / 0.656 / 0.381 / 0 ms |
+| Rendered interaural lag (cross-correlation of an impulse): L, Lss, Lrs, Ltf, Ltr, C, Cts | 0.27, 0.67, 0.79, 0.27, 0.79, 0, 0 ms | 0.27, 0.67, 0.39, 0.19, 0.27, 0, 0 ms; Rrs mirrors Lrs |
+| Room: back wall / ceiling reflection ITD | 19 / 0 samples | 0 / 0 |
+| Upmix level vs input: hard left, centre, half left (default tuning) | +2.49, 0.00, +2.21 dB | 0.00, 0.00, 0.00 dB (also at Centre 1, Width 1) |
+| New rear-only event in a bed, first 30 ms | −2.78 dB | 0.00 dB |
+| LFE vs centre at 45 Hz, Dry / Near / Mid / Far | +6.7 / +5.1 / +6.6 / +9.5 dB | +9.7 / +9.6 / +9.6 / +9.5 dB (spread 0.16, limit 0.25) |
+| Quiet after a limited burst | −72.8 dB (known stall) | −138.3 dB |
+
+**Switching.** A 100 Hz tone with a change at 2 s; the largest sample-to-sample step within 43 ms before to 125 ms after it, relative to the largest step in a steady stretch before (1–1.9 s) or after (2.6–3.5 s). A discontinuity shows as ×2 and more; the dip and the room building up again move the level smoothly and stay under the ×1.25 limit.
+
+| Change | 1.0 (`d18a518`) | Classic now | Refined |
+|---|---|---|---|
+| Far → Mid | ×2.10 | ×1.09 | ×1.09 |
+| Far → Dry | ×7.95 | ×1.00 | ×1.00 |
+| Dry → Far | ×11.09 | ×1.10 | ×1.11 |
+| Far: Classic ↔ Refined | — | ×1.15 | ×1.15 |
+
+**No stale room.** Far with loud noise, Dry with a quiet tone for 2 s, then Far again, compared with the same run starting from silence: the old room returned at −13.7 dB re signal in 1.0, now −262 dB (both renderers).
+
+The gate in §2 has no mid-stream room or renderer changes, so the new switching behaviour (which also applies to Classic) doesn't affect it.
+
+## 4. Same output as 0.9
 
 `Bench/run.sh` extracts the 0.9 engine from git commit `2b61cdd` (`Bench/.legacy`, built as the `LegacyCore` target) and runs both engines on identical input: 512-frame blocks at 48 kHz, noise and tones shaped like music, at levels where the limiter is idle (separate loud cases test it working). "diff" is the RMS of the difference relative to the RMS of the 0.9 output; "worst sample" is the largest single-sample difference.
 
@@ -52,7 +79,7 @@ Everything apart from the switch fades is at or below −83 dB, and in steady st
 
 **During a switch** the two engines differ by up to −34 dB for about 250 ms. 0.9 crossfaded two rendered outputs (each with its own room); 1.0 crossfades the speaker feeds into one renderer and room. Both fade over 50 ms between time-aligned signals, so neither jumps; they're just different fades.
 
-## 4. CPU
+## 5. CPU
 
 Same bench: one core, release build, 512-frame blocks. Per second of audio:
 
@@ -68,7 +95,7 @@ These count the DSP only. The app adds less on top than 0.9 did: no ring buffer,
 
 **Live** (`Sfera --cpu-probe 10`, a real BlackHole session at −90 dB, process CPU time including the probe's own tone writer and Core Audio's IO threads): 4.9 % playing stereo, 1.1 % with nothing playing. Sampling shows the render IOProc at about 2.5 %. That is higher than the bench because macOS runs light real-time threads on efficiency cores at low clock. The rest is Core Audio's aggregate-device work for two IO threads. Sampling also found the 16-channel deinterleave using `vDSP_mmov` with one column per row, which was slow. A strided `vDSP_vsmul` brought the silent case down from 1.55 % to 1.05 %.
 
-## 5. BlackHole round trip
+## 6. BlackHole round trip
 
 `Sfera --surround-probe` plays 16 tagged tones (220 Hz + 110 Hz × channel) into BlackHole while a real `Session` (aggregate device, IOProc, spatializer at −90 dB) records what it receives:
 
@@ -77,7 +104,7 @@ surround-probe: 16 channels at 48000 Hz · 376 IO cycles · 192000 frames record
 surround-probe: every channel arrived in order · detected Atmos · rendered in the IO cycle
 ```
 
-## 6. Routing
+## 7. Routing
 
 `Sfera --route-probe` drives the real `Controller` through the Sound-menu cases, with Sfera at −90 dB:
 
@@ -92,11 +119,11 @@ The probe puts the Mac's output and BlackHole's volume back as they were.
 
 **Process tap.** In the shell these checks ran from, a process tap gets 0 IO cycles. That limit was the same for 0.9 (see its notes). `Sfera --tap-probe` from your own Terminal confirms the route.
 
-## 7. Snapshots
+## 8. Snapshots
 
 `docs/screenshots/`: `atmos`, `stereo`, `stereo-tap` (no BlackHole: amber notice with Get), `original`, `off`, `settings`. They're rendered with `ImageRenderer` from the panel's own views (`Sfera --snapshot`). All controls are drawn in SwiftUI so that snapshots show them; `Link` doesn't render there, so the Get button is a `Button`.
 
-## 8. Carried over from 0.9
+## 9. Carried over from 0.9
 
 The routing rules are 0.9's, after three bugs found on 2026-11-04/05:
 
@@ -104,7 +131,7 @@ The routing rules are 0.9's, after three bugs found on 2026-11-04/05:
 2. BlackHole's own volume (set by the volume keys while it's the output) had been left at −40 dB. Each session now starts it at the middle (−32 dB).
 3. AVAudioEngine followed the default output to BlackHole. 1.0 has no AVAudioEngine: the IOProc lives on an aggregate device whose clock is your real output, so it can't move.
 
-## 9. Not verified
+## 10. Not verified
 
 - Listening tests of 1.0 against 0.9. The bench says they're the same to −83 dB in steady state, but switch fades are different (section 3).
 - `Scripts/check.sh` reports hardware probes that don't pass as "not passed" at the end instead of finishing with a success line. `STRICT=1` makes them fatal.

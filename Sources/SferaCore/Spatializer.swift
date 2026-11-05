@@ -16,6 +16,11 @@ import Synchronization
 /// sleeps while a surround bed plays and wakes 0.5 s before it could be needed. After 3 s
 /// of digital silence the whole chain goes dormant.
 ///
+/// Room mode and renderer changes dip the spatial output and the room's input for about
+/// 10 ms, switch at silence and fade in again; the room's tail keeps decaying through the
+/// switch (into Dry too), so it never comes back stale. Head filters restart from silence
+/// when Dry is entered or left.
+///
 /// `process` runs on the audio thread and never allocates or blocks; `update` may be
 /// called from any thread.
 public final class Spatializer: @unchecked Sendable {
@@ -58,7 +63,8 @@ public final class Spatializer: @unchecked Sendable {
     private var ringWrite = 0
     private let delayed: [UnsafeMutablePointer<Float>]
 
-    private let head: HeadRenderer
+    /// One head renderer per `Renderer` (indexed by `headIndex`); only the active one runs.
+    private let heads: [HeadRenderer]
     private let room: Room
     private var roomSilent = 0
     private var lfe: Biquad
@@ -69,6 +75,7 @@ public final class Spatializer: @unchecked Sendable {
     private let feeds: UnsafeMutablePointer<UnsafeMutablePointer<Float>?>
     private let mix: [UnsafeMutablePointer<Float>]
     private let ramp: UnsafeMutablePointer<Float>
+    private let dipRamp: UnsafeMutablePointer<Float>
     private let spatL, spatR, sendL, sendR, origL, origR, lfeBuf: UnsafeMutablePointer<Float>
 
     // Content switching.
@@ -83,6 +90,21 @@ public final class Spatializer: @unchecked Sendable {
     // Spatial ↔ Original.
     private var crossfade: Float
     private let crossfadeCoef: Float
+
+    // What is being rendered now; a different mode or renderer in `settings` dips to it.
+    private var appliedMode: RoomMode
+    private var appliedRenderer: Renderer
+    private var dip: Float = 1
+    private var dipping = false
+    private let dipStep: Float
+    /// A renderer change also dips the room's output (its reflection taps change).
+    private var dipRoom = false
+    /// The room-mode makeup now; it glides to a new mode's over the fade-in, because the
+    /// room's tail rings on through a mode change.
+    private var makeup: Float
+    private var makeupStep: Float = 0
+    /// Refined: the stereo ↔ bed crossfade is linear and finishes within the input delay.
+    private let refinedFadeStep: Float
 
     // Fold-down for the Original of a surround bed.
     private let foldL: [Float], foldR: [Float]
@@ -114,7 +136,10 @@ public final class Spatializer: @unchecked Sendable {
 
         var speakers = Set(Layout.upmix)
         if adaptive { speakers.formUnion(Layout.loopback.prefix(channels)) }
-        head = HeadRenderer(speakers: speakers.sorted { $0.rawValue < $1.rawValue }, sampleRate: sampleRate, maxFrames: maxFrames)
+        let sortedSpeakers = speakers.sorted { $0.rawValue < $1.rawValue }
+        heads = Renderer.allCases.map {
+            HeadRenderer(speakers: sortedSpeakers, sampleRate: sampleRate, maxFrames: maxFrames, renderer: $0)
+        }
         room = Room(sampleRate: sampleRate)
         lfe = .lowPass(80, sampleRate: sampleRate)
         limiter = Limiter(sampleRate: sampleRate)
@@ -125,6 +150,7 @@ public final class Spatializer: @unchecked Sendable {
         feeds.initialize(repeating: nil, count: speakerCount)
         mix = (0..<speakerCount).map { _ in makeBuffer(maxFrames) }
         ramp = makeBuffer(maxFrames)
+        dipRamp = makeBuffer(maxFrames)
         spatL = makeBuffer(maxFrames); spatR = makeBuffer(maxFrames)
         sendL = makeBuffer(maxFrames); sendR = makeBuffer(maxFrames)
         origL = makeBuffer(maxFrames); origR = makeBuffer(maxFrames)
@@ -137,6 +163,13 @@ public final class Spatializer: @unchecked Sendable {
         lastActive.initialize(repeating: -Int(Self.holdSeconds * sampleRate) - 1, count: channels)
         crossfade = settings.spatial ? 1 : 0
         crossfadeCoef = Float(1 - exp(-1 / (0.03 * sampleRate)))
+        appliedMode = settings.renderMode
+        appliedRenderer = settings.renderer
+        makeup = dbToGain(settings.renderMode.makeupDB)
+        dipStep = Float(1 / (0.01 * sampleRate))
+        // 30 ms, but always done 64 samples before a newly detected bed sample comes out of
+        // the delay line (the detector sees it `delay` samples early).
+        refinedFadeStep = 1 / Float(max(1, min(Int(0.03 * sampleRate), delay - 64)))
         dormantAfter = Int(3 * sampleRate)
 
         var fl: [Float] = [], fr: [Float] = []
@@ -161,7 +194,7 @@ public final class Spatializer: @unchecked Sendable {
         for j in 0..<Upmixer.outputCount { upOut[j].deallocate() }
         upOut.deallocate()
         feeds.deallocate()
-        for p in [ramp, spatL, spatR, sendL, sendR, origL, origR, lfeBuf] { p.deallocate() }
+        for p in [ramp, dipRamp, spatL, spatR, sendL, sendR, origL, origR, lfeBuf] { p.deallocate() }
         lastActive.deallocate()
     }
 
@@ -228,9 +261,30 @@ public final class Spatializer: @unchecked Sendable {
         w = (w + frames) & ringMask
         ringWrite = w
 
+        // Room mode / renderer change: once the dip has reached silence, switch.
+        let wanted = (settings.renderMode, settings.renderer)
+        if wanted != (appliedMode, appliedRenderer) {
+            if wanted.1 != appliedRenderer { dipRoom = true }
+            if dip == 0 { applyRender(mode: wanted.0, renderer: wanted.1) } else { dipping = true }
+        }
+        let renderer = appliedRenderer
+        let refined = renderer == .refined
+        upmixer.coherentSteering = refined
+        limiter.exactRelease = refined
+
         // 4. Content crossfade weight (0 = upmix, 1 = bed).
         var ramping = false
-        if adaptive, weight != target {
+        if adaptive, weight != target, refined {
+            // Linear, done before the first delayed sample of a new bed arrives.
+            ramping = true
+            var w = weight
+            let step = refinedFadeStep
+            for i in 0..<frames {
+                w = target > w ? min(target, w + step) : max(target, w - step)
+                ramp[i] = w
+            }
+            weight = w
+        } else if adaptive, weight != target {
             // One-pole glide written as a decaying distance to the target, so it really
             // arrives (w += (t − w)·c stalls 7·10⁻⁵ short of 1 in single precision).
             ramping = true
@@ -307,17 +361,20 @@ public final class Spatializer: @unchecked Sendable {
         }
 
         // 7. Binaural render + LFE + room.
-        let mode = settings.renderMode
+        let mode = appliedMode
         let dry = mode == .off
         let direct = dbToGain(mode.directDB)
         let send = dry ? 0 : dbToGain(mode.sendDB)
         vDSP_vclr(spatL, 1, n); vDSP_vclr(spatR, 1, n)
         vDSP_vclr(sendL, 1, n); vDSP_vclr(sendR, 1, n)
-        head.process(feeds: feeds, frames: frames, direct: direct, send: send, dry: dry,
-                     outL: spatL, outR: spatR, sendL: sendL, sendR: sendR)
+        heads[Self.headIndex(renderer)].process(feeds: feeds, frames: frames, direct: direct, send: send, dry: dry,
+                                               outL: spatL, outR: spatR, sendL: sendL, sendR: sendR)
 
         if let x = lfeFeed {
-            var g = lfeGain
+            // Classic: the LFE skips the direct-path level, so it moves against the mains as the
+            // room changes (+1.5 dB Near … +6 dB Far). Refined holds Far's balance in every
+            // mode; in Dry the centre is panned at −3 dB per ear, so the LFE follows it.
+            var g = refined ? lfeGain * dbToGain(mode.directDB - RoomMode.far.directDB) * (dry ? 0.70710678 : 1) : lfeGain
             vDSP_vsmul(x, 1, &g, lfeBuf, 1, n)
             lfeSilent = 0
         } else if lfeSilent < dormantAfter {
@@ -331,17 +388,30 @@ public final class Spatializer: @unchecked Sendable {
             vDSP_vadd(spatR, 1, lfeBuf, 1, spatR, 1, n)
         }
 
-        if !dry {
+        // Dip: the direct path, LFE and the room's input fade towards a pending change (and
+        // back in after it), so no gain or filter step reaches the room's echoes.
+        let dipNow = dipping, dipAfterRoom = dipRoom
+        if dipNow {
+            fillDip(frames: frames)
+            if !dipAfterRoom { vDSP_vmul(spatL, 1, dipRamp, 1, spatL, 1, n); vDSP_vmul(spatR, 1, dipRamp, 1, spatR, 1, n) }
+            vDSP_vmul(sendL, 1, dipRamp, 1, sendL, 1, n); vDSP_vmul(sendR, 1, dipRamp, 1, sendR, 1, n)
+        }
+
+        // The room runs until its tail has died away, in Dry too (Dry sends nothing).
+        do {
             var sendPeak: Float = 0, p: Float = 0
             vDSP_maxmgv(sendL, 1, &sendPeak, n)
             vDSP_maxmgv(sendR, 1, &p, n)
             sendPeak = max(sendPeak, p)
             roomSilent = sendPeak == 0 ? roomSilent + frames : 0
             if roomSilent < dormantAfter {
-                room.process(sendL: sendL, sendR: sendR, addingTo: spatL, spatR, frames: frames)
+                room.process(sendL: sendL, sendR: sendR, addingTo: spatL, spatR, frames: frames, renderer: renderer)
             } else if roomSilent - frames < dormantAfter {
                 room.reset()
             }
+        }
+        if dipNow, dipAfterRoom {
+            vDSP_vmul(spatL, 1, dipRamp, 1, spatL, 1, n); vDSP_vmul(spatR, 1, dipRamp, 1, spatR, 1, n)
         }
 
         // 8. Original, time-aligned (only while it's audible).
@@ -363,11 +433,26 @@ public final class Spatializer: @unchecked Sendable {
         }
 
         // 9. Loudness-matched Spatial ↔ Original, output gain, limiter.
-        let makeup = dbToGain(mode.makeupDB)
+        let makeupTarget = dbToGain(mode.makeupDB)
+        let gliding = makeup != makeupTarget
+        if gliding {
+            // dipRamp is free again: reuse it for the makeup glide.
+            var m = makeup
+            let step = makeupStep
+            for i in 0..<frames {
+                m = makeupTarget > m ? min(makeupTarget, m + step) : max(makeupTarget, m - step)
+                dipRamp[i] = m
+            }
+            makeup = m
+        }
         var gain = dbToGain(settings.outputGainDB)
         if !needOriginal {
             var m = makeup
-            vDSP_vsmul(spatL, 1, &m, outL, 1, n); vDSP_vsmul(spatR, 1, &m, outR, 1, n)
+            if gliding {
+                vDSP_vmul(spatL, 1, dipRamp, 1, outL, 1, n); vDSP_vmul(spatR, 1, dipRamp, 1, outR, 1, n)
+            } else {
+                vDSP_vsmul(spatL, 1, &m, outL, 1, n); vDSP_vsmul(spatR, 1, &m, outR, 1, n)
+            }
             vDSP_vsmul(outL, 1, &gain, outL, 1, n); vDSP_vsmul(outR, 1, &gain, outR, 1, n)
         } else {
             var d = spatialTarget - crossfade
@@ -375,7 +460,7 @@ public final class Spatializer: @unchecked Sendable {
             for i in 0..<frames {
                 d *= r
                 let xf = spatialTarget - d
-                let s = xf * makeup
+                let s = xf * (gliding ? dipRamp[i] : makeup)
                 let o = 1 - xf
                 outL[i] = (spatL[i] * s + origL[i] * o) * gain
                 outR[i] = (spatR[i] * s + origR[i] * o) * gain
@@ -389,6 +474,36 @@ public final class Spatializer: @unchecked Sendable {
         vDSP_maxmgv(outL, 1, &pl, n)
         vDSP_maxmgv(outR, 1, &pr, n)
         outPeakBits.store(max(pl, pr).bitPattern, ordering: .relaxed)
+    }
+
+    private static func headIndex(_ renderer: Renderer) -> Int { renderer == .classic ? 0 : 1 }
+
+    /// The dip gain for this block: down to 0 while a change is pending, then up to 1 once it
+    /// has been applied. When nothing is changing it isn't computed or applied at all.
+    private func fillDip(frames: Int) {
+        let pending = (settings.renderMode, settings.renderer) != (appliedMode, appliedRenderer)
+        let step = pending ? -dipStep : dipStep
+        var g = dip
+        for i in 0..<frames {
+            g = min(max(g + step, 0), 1)
+            dipRamp[i] = g
+        }
+        dip = g
+        if !pending, g == 1 { dipping = false; dipRoom = false }
+    }
+
+    /// Switches mode/renderer while the spatial path is silent.
+    private func applyRender(mode: RoomMode, renderer: Renderer) {
+        let dryChange = (mode == .off) != (appliedMode == .off)
+        if renderer != appliedRenderer || dryChange {
+            // A renderer that wasn't running, or Dry (which skips the head filters), holds
+            // stale filter state: start it from silence.
+            heads[Self.headIndex(renderer)].reset()
+        }
+        appliedMode = mode
+        appliedRenderer = renderer
+        makeupStep = abs(dbToGain(mode.makeupDB) - makeup) * dipStep
+        dipping = true                       // fade back in
     }
 
     /// Conventional fold of the delayed bed to stereo (the Original of surround content).
@@ -414,7 +529,7 @@ public final class Spatializer: @unchecked Sendable {
         silentFrames = 0
         upmixer.reset()
         upmixRunning = true
-        head.reset()
+        for h in heads { h.reset() }
         room.reset()
         roomSilent = 0
         lfe.reset()
@@ -423,5 +538,11 @@ public final class Spatializer: @unchecked Sendable {
         for r in ring { vDSP_vclr(r, 1, vDSP_Length(ringMask + 1)) }
         weight = adaptive ? target : 0
         crossfade = spatialTarget
+        appliedMode = settings.renderMode
+        appliedRenderer = settings.renderer
+        makeup = dbToGain(settings.renderMode.makeupDB)
+        dip = 1
+        dipping = false
+        dipRoom = false
     }
 }

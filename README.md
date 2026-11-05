@@ -20,13 +20,13 @@ Spatial audio for headphones, from the menu bar. Turn it on and everything your 
 open Sfera.app
 ```
 
-Sfera has no window and no Dock icon. It lives in the menu bar (headphones icon: outline = off, ring = on, filled = spatial). Right-click it for Turn On/Off, Spatial and **Quit**. Click it for the panel:
+Sfera has no window and no Dock icon. It lives in the menu bar (headphones icon: outline = off, ring = on, filled = spatial). Right-click it for Turn On/Off, Spatial, Refined Renderer and **Quit**. Click it for the panel:
 
 - **The switch** turns listening on and off. Off hands the Mac's sound back exactly as it was.
 - **The sound field** shows what you're hearing. Teal dots are the channels that are really arriving (5.1, 7.1, Atmos). Violet dots are the virtual speakers the stereo upmix creates.
 - **Spatial / Original** compares at matched loudness, so the comparison is fair.
 - **Room:** Dry / Near / Mid / Far is how much virtual room you hear. Mid sounds most like speakers.
-- **Settings** (bottom left) has the upmix tuning (centre, width, surround, height, bass to LFE), a volume trim, the BlackHole switch, "Listen when Sfera opens" and "Open at login".
+- **Settings** (bottom left) has the renderer (Classic is the 1.0 sound, unchanged; Refined fixes rear/height placement, upmix level and bass balance, see [docs/ENGINE.md](docs/ENGINE.md#renderers-classic-and-refined)), the upmix tuning (centre, width, surround, height, bass to LFE), a volume trim, the BlackHole switch, "Listen when Sfera opens" and "Open at login".
 
 How much Sfera can hear depends on whether [BlackHole 16ch](https://existential.audio/blackhole/) is installed:
 

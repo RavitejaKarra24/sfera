@@ -79,6 +79,25 @@ Bass-managed at the crossover (default 80 Hz) and folded into both ears at +5.5 
 
 Output then passes the look-ahead limiter (−1.5 dB threshold, −0.3 dB ceiling, 2 ms look-ahead, 160 ms release) and the output gain stage.
 
+## Renderers: Classic and Refined
+
+Settings › Renderer picks one; Classic is the default, and saved settings without a renderer load as Classic. **Classic** is Sfera 1.0 exactly: the bench renders it next to the engine frozen at `d18a518` and requires a bit-identical match (VALIDATION §2). **Refined** keeps the same room, gains and voicing and corrects what the 1.0 model gets wrong:
+
+| | Classic | Refined |
+|---|---|---|
+| ITD angle | the azimuth itself, so a rear speaker at 135° gets *more* ITD than a side one (0.78 ms vs 0.67) | the lateral angle `θ = asin(|sin az · cos el|)`, so ITD rises to 90° and falls to 0 at 180° (Woodworth): Lrs 0.39 ms |
+| Height speakers | ITD and shadow of their ear-plane speaker | the same model with `cos el`: Ltf 0.19 ms (vs L 0.27), Ltr 0.27 ms (vs Lrs 0.39) |
+| Head shadow | from `sin az` | from the lateral component, and the rear term scaled by `cos el` |
+| Room: back wall / ceiling reflections | the back wall (180°) carried 19 samples of ITD | 0 at 0° and 180°; all eight reflections use the lateral-angle ITD |
+| Upmix level | a hard-left or half-left source came out +2.2…+2.5 dB louder than the input: parts of it that reach the same speaker coherently added in amplitude where the pan law assumed power | coherent steering: the steering and pan gains account for the inter-channel coherence (`k = 1/(√(b²+1)+b)` on the recombined pair), so hard left, half left and centre all keep the input level (±0.00 dB) |
+| New rear event in a bed | the 50 ms one-pole crossfade let the first 30 ms of a rear-only event through at −2.8 dB | linear crossfade finished before the first delayed bed sample appears: full level |
+| LFE vs mains | the LFE skipped the room's direct-path level, so bass moved against the mains by 4.4 dB across rooms (+6.7/+5.1/+6.6/+9.5 dB re centre) | Far's balance (+9.5 dB) in every room; in Dry it follows the −3 dB centre pan |
+| Limiter release | stalls at −0.002 dB after a limited burst (Float) | release tracked in Double: recovers fully |
+
+Refined costs about 0.06 % more of one core on stereo (0.78 % vs 0.72 %). Its fractional delay lines are `max(129, ⌈maxITD·fs⌉ + 3)` long, so they cover the largest ITD at any sample rate.
+
+**Changing room mode or renderer.** The direct path, LFE and the room's input dip to silence over 10 ms, the change is applied there, and they fade back in over 10 ms. The room's tail keeps ringing through the change (it decays naturally into Dry rather than being cut), and the room-mode makeup glides to the new value over the fade-in so the tail doesn't jump. A renderer change also dips the room's output, because its reflection taps change. Entering or leaving Dry restarts the head filters from silence. This applies to both renderers; 1.0's switches clicked, up to 11× the signal's own slope and up to −13.7 dB of the old room returning after Dry → Far.
+
 ## Real-time chain
 
 `Spatializer.swift` takes 2–16 planar input channels and returns binaural stereo. It never allocates or blocks on the audio thread. Settings arrive through an `OSAllocatedUnfairLock` that the render thread only tries (`withLockIfAvailable`), and meters go out through atomics.

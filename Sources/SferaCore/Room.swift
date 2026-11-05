@@ -8,6 +8,11 @@ import Foundation
 /// (8.7–29.8 ms, each with its own ITD and far-ear shadow) and an 8-line Hadamard FDN
 /// (RT60 0.42 s, 5.2 kHz damping, 18 ms predelay) with orthogonal L/R taps.
 /// After Jot & Chaigne 1991 and Begault 1994; not Dolby's virtual room.
+///
+/// Two early-reflection tables share the bus and the FDN. Classic is Sfera 1.0's: its ITD
+/// uses min(θ, 90°) + sin θ, which gives the 180° back wall 0.40 ms to one ear. Refined
+/// uses the lateral angle (Woodworth, zero at 0° and 180°), and reflections from straight
+/// ahead or behind reach both ears identically.
 final class Room {
     private static let reflections: [(azimuth: Double, delayMS: Double, gain: Float, side: Int)] = [
         (-55, 8.7, 0.62, -1),
@@ -21,6 +26,7 @@ final class Room {
     ]
     private static let fdnDelays48k = [1031, 1327, 1523, 1801, 2053, 2311, 2579, 2861]
     private static let count = 8
+    static let tables = 2
 
     private var hpL: Biquad, hpR: Biquad
     private let lpCoef: Float
@@ -54,23 +60,35 @@ final class Room {
         hpR = .highPass(160, sampleRate: sampleRate)
         lpCoef = onePoleCoefficient(7000, sampleRate: sampleRate)
 
-        nearDelay = .allocate(capacity: n); farDelay = .allocate(capacity: n)
-        nearGain = .allocate(capacity: n); farGain = .allocate(capacity: n)
-        side = .allocate(capacity: n); rightIsNear = .allocate(capacity: n)
-        shadowCoef = .allocate(capacity: n); shadowState = makeBuffer(n)
+        let all = n * Self.tables
+        nearDelay = .allocate(capacity: all); farDelay = .allocate(capacity: all)
+        nearGain = .allocate(capacity: all); farGain = .allocate(capacity: all)
+        side = .allocate(capacity: all); rightIsNear = .allocate(capacity: all)
+        shadowCoef = .allocate(capacity: all); shadowState = makeBuffer(all)
         let headDelay = 0.0875 / 343.0
         var longest = 0
-        for (j, r) in Self.reflections.enumerated() {
-            let theta = abs(r.azimuth) * .pi / 180
-            let itd = headDelay * (min(theta, .pi / 2) + sin(theta)) * sampleRate
-            let base = Int(r.delayMS / 1000 * sampleRate)
-            let lateral = abs(sin(theta))
-            let far = base + Int(itd.rounded())
-            longest = max(longest, far)
-            nearDelay[j] = base; farDelay[j] = far
-            nearGain[j] = r.gain; farGain[j] = r.gain * Float(1 - 0.45 * lateral)
-            side[j] = r.side; rightIsNear[j] = r.azimuth > 0
-            shadowCoef[j] = onePoleCoefficient(18000 * pow(1800.0 / 18000.0, lateral), sampleRate: sampleRate)
+        for table in 0..<Self.tables {
+            for (i, r) in Self.reflections.enumerated() {
+                let j = table * n + i
+                let theta = abs(r.azimuth) * .pi / 180
+                let lateral = abs(sin(theta))
+                let itd: Double
+                if table == 0 {
+                    itd = headDelay * (min(theta, .pi / 2) + sin(theta)) * sampleRate
+                } else {
+                    let lateralAngle = asin(min(lateral, 1))
+                    itd = headDelay * (lateralAngle + lateral) * sampleRate
+                }
+                let base = Int(r.delayMS / 1000 * sampleRate)
+                let far = base + Int(itd.rounded())
+                longest = max(longest, far)
+                nearDelay[j] = base; farDelay[j] = far
+                nearGain[j] = r.gain; farGain[j] = r.gain * Float(1 - 0.45 * lateral)
+                side[j] = r.side; rightIsNear[j] = r.azimuth > 0
+                // Refined: a reflection on the median plane has no far ear (no shadow filter).
+                shadowCoef[j] = table == 1 && lateral < 1e-9 ? 1
+                    : onePoleCoefficient(18000 * pow(1800.0 / 18000.0, lateral), sampleRate: sampleRate)
+            }
         }
         predelay = Int(0.018 * sampleRate)
         let size = nextPowerOfTwo(atLeast: max(longest, predelay) + 2)
@@ -92,6 +110,12 @@ final class Room {
         dampState = makeBuffer(n)
     }
 
+    /// Early reflections of a table: azimuth and far-ear minus near-ear delay (samples).
+    func reflectionITDs(renderer: Renderer) -> [(azimuth: Double, samples: Int)] {
+        let t = renderer == .classic ? 0 : Self.count
+        return Self.reflections.enumerated().map { i, r in (r.azimuth, farDelay[t + i] - nearDelay[t + i]) }
+    }
+
     deinit {
         for j in 0..<Self.count { lines[j].deallocate() }
         for p in [nearGain, farGain, shadowCoef, shadowState, busL, busR, feedback, dampState] { p.deallocate() }
@@ -102,7 +126,7 @@ final class Room {
     func reset() {
         hpL.reset(); hpR.reset()
         lpL = 0; lpR = 0
-        vDSP_vclr(shadowState, 1, vDSP_Length(Self.count))
+        vDSP_vclr(shadowState, 1, vDSP_Length(Self.count * Self.tables))
         vDSP_vclr(dampState, 1, vDSP_Length(Self.count))
         vDSP_vclr(busL, 1, vDSP_Length(historyMask + 1))
         vDSP_vclr(busR, 1, vDSP_Length(historyMask + 1))
@@ -114,17 +138,20 @@ final class Room {
     }
 
     /// Adds the room response to `outL`/`outR` for `frames` samples of send input.
+    /// `renderer` picks the early-reflection table.
     func process(sendL: UnsafePointer<Float>, sendR: UnsafePointer<Float>,
-                 addingTo outL: UnsafeMutablePointer<Float>, _ outR: UnsafeMutablePointer<Float>, frames: Int) {
+                 addingTo outL: UnsafeMutablePointer<Float>, _ outR: UnsafeMutablePointer<Float>, frames: Int,
+                 renderer: Renderer = .classic) {
         let mask = historyMask
         var hl = hpL, hr = hpR
         var ll = lpL, lr = lpR
         let lc = lpCoef, dc = dampCoef
         let busL = self.busL, busR = self.busR
-        let nearDelay = self.nearDelay, farDelay = self.farDelay
-        let nearGain = self.nearGain, farGain = self.farGain
-        let side = self.side, rightIsNear = self.rightIsNear
-        let shadowCoef = self.shadowCoef, shadowState = self.shadowState
+        let t = renderer == .classic ? 0 : Self.count
+        let nearDelay = self.nearDelay + t, farDelay = self.farDelay + t
+        let nearGain = self.nearGain + t, farGain = self.farGain + t
+        let side = self.side + t, rightIsNear = self.rightIsNear + t
+        let shadowCoef = self.shadowCoef + t, shadowState = self.shadowState + t
         let lines = self.lines, heads = self.heads, lineLength = self.lineLength
         let feedback = self.feedback, damp = self.dampState
         let norm = self.norm, lateGain = self.lateGain, predelay = self.predelay
@@ -207,9 +234,15 @@ final class Limiter {
     private var qHead = 0, qTail = 0
     private var t = 0
     private var gain: Float = 1
+    /// Refined release state, in double precision (see `process`).
+    private var gainD: Double = 1
     private let threshold: Float, ceiling: Float, releaseCoef: Float
     /// Only act on overs (> 0 dBFS): the untouched Original path.
     var transparent = false
+    /// Refined renderer: release in double precision so the gain really returns to unity.
+    var exactRelease = false {
+        didSet { if exactRelease != oldValue { gainD = Double(gain) } }
+    }
 
     init(sampleRate: Double, thresholdDB: Double = -1.5, ceilingDB: Double = -0.3, lookaheadMS: Double = 2, releaseMS: Double = 160) {
         latency = max(1, Int(lookaheadMS / 1000 * sampleRate))
@@ -228,13 +261,14 @@ final class Limiter {
     func reset() {
         vDSP_vclr(delayL, 1, vDSP_Length(mask + 1))
         vDSP_vclr(delayR, 1, vDSP_Length(mask + 1))
-        qHead = 0; qTail = 0; t = 0; gain = 1
+        qHead = 0; qTail = 0; t = 0; gain = 1; gainD = 1
         qIndex.update(repeating: 0, count: mask + 1)
         qValue.update(repeating: 1, count: mask + 1)
     }
 
     /// Limits in place (output delayed by the look-ahead).
     func process(_ l: UnsafeMutablePointer<Float>, _ r: UnsafeMutablePointer<Float>, frames: Int) {
+        if exactRelease { processExact(l, r, frames: frames); return }
         let threshold: Float = transparent ? 1 : self.threshold
         let ceiling: Float = transparent ? 1 : self.ceiling
         let mask = self.mask, lookahead = latency
@@ -251,6 +285,9 @@ final class Limiter {
             let windowMin = qValue[qHead]
             // Release as a decaying distance to the target: `g += (t − g)·c` stalls
             // 2.3·10⁻⁴ short of unity in single precision and never fully recovers.
+            // (It doesn't: the distance is rebuilt from the rounded gain every sample, so it
+            // stalls where one step is under half an ULP, at 1 − 2.3·10⁻⁴. Classic keeps this;
+            // `processExact` is the fix.)
             if windowMin < gain { gain = windowMin } else { gain = windowMin - (windowMin - gain) * releaseKeep }
 
             let w = t & mask
@@ -261,5 +298,34 @@ final class Limiter {
             t += 1
         }
         self.qHead = qHead; self.qTail = qTail; self.t = t; self.gain = gain
+    }
+
+    /// Same limiter with the release tracked in Double: the step to unity stays far above the
+    /// rounding error, and once the gain is within a Float ULP of 1 it is exactly 1.
+    private func processExact(_ l: UnsafeMutablePointer<Float>, _ r: UnsafeMutablePointer<Float>, frames: Int) {
+        let threshold: Float = transparent ? 1 : self.threshold
+        let ceiling: Float = transparent ? 1 : self.ceiling
+        let mask = self.mask, lookahead = latency
+        let qIndex = self.qIndex, qValue = self.qValue, delayL = self.delayL, delayR = self.delayR
+        var qHead = self.qHead, qTail = self.qTail, t = self.t, g = gainD
+        let releaseKeep = 1 - Double(releaseCoef)
+        for i in 0..<frames {
+            let peak = max(abs(l[i]), abs(r[i]))
+            let required: Float = peak > threshold ? threshold / peak : 1
+            while qTail != qHead, qValue[(qTail - 1) & mask] >= required { qTail = (qTail - 1) & mask }
+            qIndex[qTail] = t; qValue[qTail] = required; qTail = (qTail + 1) & mask
+            while qIndex[qHead] <= t - (lookahead + 1) { qHead = (qHead + 1) & mask }
+            let windowMin = Double(qValue[qHead])
+            if windowMin < g { g = windowMin } else { g = windowMin - (windowMin - g) * releaseKeep }
+            let gain = Float(g)
+
+            let w = t & mask
+            let dl = delayL[(t - lookahead) & mask], dr = delayR[(t - lookahead) & mask]
+            delayL[w] = l[i]; delayR[w] = r[i]
+            l[i] = min(max(dl * gain, -ceiling), ceiling)
+            r[i] = min(max(dr * gain, -ceiling), ceiling)
+            t += 1
+        }
+        self.qHead = qHead; self.qTail = qTail; self.t = t; gainD = g; gain = Float(g)
     }
 }

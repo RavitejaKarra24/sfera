@@ -159,10 +159,11 @@ final class Controller {
     func toggleSpatial() { settings.spatial.toggle() }
 
     func resetTuning() {
-        let spatial = settings.spatial, room = settings.renderMode
+        let spatial = settings.spatial, room = settings.renderMode, renderer = settings.renderer
         settings = LiveSettings()
         settings.spatial = spatial
         settings.renderMode = room
+        settings.renderer = renderer
     }
 
     // MARK: - What the panel shows

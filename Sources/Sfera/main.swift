@@ -71,6 +71,9 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSPopoverDelegate {
         let spatial = menu.addItem(withTitle: "Spatial", action: #selector(toggleSpatial), keyEquivalent: "")
         spatial.target = self
         spatial.state = model.settings.spatial ? .on : .off
+        let refined = menu.addItem(withTitle: "Refined Renderer", action: #selector(toggleRenderer), keyEquivalent: "")
+        refined.target = self
+        refined.state = model.settings.renderer == .refined ? .on : .off
         menu.addItem(.separator())
         menu.addItem(withTitle: "Quit Sfera", action: #selector(NSApplication.terminate(_:)), keyEquivalent: "q")
         // Attach the menu only for this click, so a left click keeps opening the panel.
@@ -81,6 +84,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSPopoverDelegate {
 
     @objc private func toggleOn() { model.setOn(!model.wantsOn) }
     @objc private func toggleSpatial() { model.toggleSpatial() }
+    @objc private func toggleRenderer() { model.settings.renderer = model.settings.renderer == .classic ? .refined : .classic }
 
     // MARK: Popover
 

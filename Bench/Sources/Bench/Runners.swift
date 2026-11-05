@@ -75,12 +75,13 @@ typealias Change = (frame: Int, settings: SferaCore.LiveSettings)
 // MARK: - Current engine
 
 func rewrite(channels: Int, settings: SferaCore.LiveSettings, rate: Double = 48000, blocks: Blocks = .fixed(512),
-             change: Change? = nil) -> Runner {
-    { input in
+             change: Change? = nil, changes: [Change] = []) -> Runner {
+    let all = (change.map { [$0] } ?? []) + changes
+    return { input in
         let p = SferaCore.Spatializer(sampleRate: rate, channels: channels, settings: settings, maxFrames: blocks.maxFrames)
         var done = 0
         return run(inputs: p.inputs, blocks: blocks, input: input) { n, l, r in
-            if let change, done <= change.frame, done + n > change.frame { p.update(change.settings) }
+            for c in all where done <= c.frame && done + n > c.frame { p.update(c.settings) }
             p.process(frames: n, outL: l, outR: r)
             done += n
         }
@@ -96,13 +97,14 @@ func classicSettings(_ s: SferaCore.LiveSettings) -> ClassicCore.LiveSettings {
 }
 
 func classic(channels: Int, settings: SferaCore.LiveSettings, rate: Double = 48000, blocks: Blocks = .fixed(512),
-             change: Change? = nil) -> Runner {
-    { input in
+             change: Change? = nil, changes: [Change] = []) -> Runner {
+    let all = (change.map { [$0] } ?? []) + changes
+    return { input in
         let p = ClassicCore.Spatializer(sampleRate: rate, channels: channels, settings: classicSettings(settings),
                                         maxFrames: blocks.maxFrames)
         var done = 0
         return run(inputs: p.inputs, blocks: blocks, input: input) { n, l, r in
-            if let change, done <= change.frame, done + n > change.frame { p.update(classicSettings(change.settings)) }
+            for c in all where done <= c.frame && done + n > c.frame { p.update(classicSettings(c.settings)) }
             p.process(frames: n, outL: l, outR: r)
             done += n
         }

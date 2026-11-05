@@ -258,6 +258,21 @@ private struct SettingsPage: View {
     private var list: some View {
         VStack(alignment: .leading, spacing: 14) {
             VStack(alignment: .leading, spacing: 8) {
+                SectionLabel(text: "Renderer")
+                Card {
+                    VStack(alignment: .leading, spacing: 8) {
+                        Segmented(options: Renderer.allCases.map { ($0, $0.label) }, selection: binding(\.renderer), height: 26)
+                        Text(model.settings.renderer == .classic
+                             ? "Sfera 1.0's sound, unchanged."
+                             : "Truer rear and height placement, panned sources at their real level, bass steady across rooms.")
+                            .font(.system(size: 10.5))
+                            .foregroundStyle(Theme.tertiary)
+                            .fixedSize(horizontal: false, vertical: true)
+                    }
+                }
+            }
+
+            VStack(alignment: .leading, spacing: 8) {
                 SectionLabel(text: "Stereo upmix")
                 Card {
                     VStack(spacing: 13) {

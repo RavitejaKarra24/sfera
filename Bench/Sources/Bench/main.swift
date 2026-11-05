@@ -6,13 +6,16 @@ import SferaCore
 // 1. Classic gate: SferaCore must reproduce Sfera 1.0 as frozen in git (ClassicCore) for
 //    every room mode, including Far, at 44.1/48/96 kHz and irregular block sizes. A new
 //    renderer may be added next to it; the Classic sound may not drift.
-// 2. Limiter: it must actually limit loud material to the ceiling and fully recover.
-// 3. Sfera 0.9 equivalence (historical report, see docs/VALIDATION.md).
-// 4. CPU per second of audio.
+// 2. Refined renderer: cue geometry, upmix level, surround onsets, LFE balance, limiter
+//    recovery; both renderers: room changes without clicks or stale room sound.
+// 3. Limiter: it must actually limit loud material to the ceiling (and Classic's release
+//    stall is reported as a known defect).
+// 4. Sfera 0.9 equivalence (historical report, see docs/VALIDATION.md).
+// 5. CPU per second of audio.
 //
 // Every comparison fails on non-finite output. Exit status 1 on any failure.
 //
-// Flags: --classic (gate only), --no-cpu, --channels (per-channel 0.9 report),
+// Flags: --classic (gate only), --refined (gate + refined/transition checks), --no-cpu, --channels (per-channel 0.9 report),
 //        --timeline (250 ms difference timeline of the 0.9 switching test), --profile [--dry].
 //
 // Two float artefacts of 0.9 are fixed in 1.0 and show up as small differences against 0.9:
@@ -105,9 +108,13 @@ func finish() -> Never {
 
 if args.contains("--classic") { finish() }
 
-// MARK: - 2. Limiter (current engine on its own)
+refinedSuite()
+transitionSuite()
+if args.contains("--refined") { finish() }
 
-print("\nLimiter (current engine, Far, 48 kHz)")
+// MARK: - 3. Limiter (current engine on its own)
+
+print("\nLimiter (current engine, Classic, Far, 48 kHz)")
 do {
     let ceilingDB = -0.3, thresholdDB = -1.5
     for (name, channels, input) in [("loud stereo", 2, loudStereo(8)), ("loud Atmos", 16, bed(8, active: atmosChannels))] {
@@ -128,7 +135,7 @@ do {
                note: "release stalls at −0.002 dB")
 }
 
-// MARK: - 3. Sfera 0.9 equivalence
+// MARK: - 4. Sfera 0.9 equivalence
 
 if args.contains("--channels") {
     // Each bed channel on its own. L-only and R-only are stereo content (upmixed), so they
@@ -227,7 +234,7 @@ do {
     check("loud Atmos, limiter active", compare(c, d, seconds(0.5, 8)), limit: -65)
 }
 
-// MARK: - 4. CPU
+// MARK: - 5. CPU
 
 if !args.contains("--no-cpu") {
     print("\nCPU per second of audio (single core, M-series, 512-frame blocks)")
@@ -252,6 +259,17 @@ if !args.contains("--no-cpu") {
         input: bed(long, active: atmosChannels))
     cpu("BlackHole, nothing playing", legacy: legacy(channels: 16, settings: s), rewrite: rewrite(channels: 16, settings: s),
         input: silence(long, channels: 16))
+
+    var refined = s; refined.renderer = .refined
+    func cpuRefined(_ name: String, channels: Int, input: [[Float]]) {
+        let a = rewrite(channels: channels, settings: s), b = rewrite(channels: channels, settings: refined)
+        _ = a(input); _ = b(input)
+        let ta = (0..<3).map { _ in a(input).seconds }.min()!, tb = (0..<3).map { _ in b(input).seconds }.min()!
+        let dur = Double(input[0].count) / 48000
+        print(String(format: "  %-34@ Classic: %5.2f%%   Refined: %5.2f%%", name as NSString, 100 * ta / dur, 100 * tb / dur))
+    }
+    cpuRefined("Tap / stereo source", channels: 2, input: stereo(long))
+    cpuRefined("BlackHole, 9.1.6 Atmos", channels: 16, input: bed(long, active: atmosChannels))
 }
 
 finish()

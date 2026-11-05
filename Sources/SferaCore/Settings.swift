@@ -47,6 +47,26 @@ public enum RoomMode: String, Codable, CaseIterable, Sendable, Identifiable {
     }
 }
 
+/// Which renderer turns speaker feeds into headphone sound.
+///
+/// - `classic`: Sfera 1.0 exactly (the bench holds it bit-identical to commit d18a518).
+/// - `refined`: the same room and voicing with geometry and mixing fixes: rear and height
+///   ITD/shadow from the true interaural angle, a back-wall reflection with no ITD,
+///   level-preserving centre steering, surround onsets at full level, an LFE balance that
+///   doesn't move with the room, and a limiter that recovers fully.
+public enum Renderer: String, Codable, CaseIterable, Sendable, Identifiable {
+    case classic, refined
+
+    public var id: String { rawValue }
+
+    public var label: String {
+        switch self {
+        case .classic: "Classic"
+        case .refined: "Refined"
+        }
+    }
+}
+
 /// Stereo → 7.1.4 upmix controls.
 public struct UpmixSettings: Codable, Sendable, Hashable {
     /// 0 keeps a phantom centre on L/R; 1 steers all centre-panned direct sound to C.
@@ -79,6 +99,8 @@ public struct LiveSettings: Codable, Sendable, Hashable {
     public var spatial = true
     public var upmix = UpmixSettings()
     public var renderMode: RoomMode = .mid
+    /// Settings saved before the renderer existed load as `classic`, so nothing changes by itself.
+    public var renderer: Renderer = .classic
     public var outputGainDB: Double = 0
 
     public init() {}
@@ -88,6 +110,7 @@ public struct LiveSettings: Codable, Sendable, Hashable {
         spatial = try c.decodeIfPresent(Bool.self, forKey: .spatial) ?? true
         upmix = try c.decodeIfPresent(UpmixSettings.self, forKey: .upmix) ?? UpmixSettings()
         renderMode = (try? c.decodeIfPresent(RoomMode.self, forKey: .renderMode)) ?? .mid
+        renderer = (try? c.decodeIfPresent(Renderer.self, forKey: .renderer)) ?? .classic
         outputGainDB = try c.decodeIfPresent(Double.self, forKey: .outputGainDB) ?? 0
     }
 }
