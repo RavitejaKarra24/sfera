@@ -8,6 +8,10 @@ struct Panel: View {
     let model: Controller
 
     static let width: CGFloat = 320
+    /// Height of the settings list; it scrolls inside the panel so the panel never outgrows the screen.
+    static let settingsHeight: CGFloat = 420
+    /// Snapshots can't draw scroll views, so they lay the settings out flat.
+    @MainActor static var snapshotting = false
 
     var body: some View {
         ZStack {
@@ -226,67 +230,18 @@ private struct SettingsPage: View {
             .padding(.top, 10)
             .padding(.bottom, 8)
 
-            VStack(alignment: .leading, spacing: 14) {
-                VStack(alignment: .leading, spacing: 8) {
-                    SectionLabel(text: "Stereo upmix")
-                    Card {
-                        VStack(spacing: 13) {
-                            TuningSlider(title: "Centre", value: binding(\.upmix.centerExtraction))
-                            TuningSlider(title: "Width", value: binding(\.upmix.width))
-                            TuningSlider(title: "Surround", value: binding(\.upmix.surround))
-                            TuningSlider(title: "Height", value: binding(\.upmix.height))
-                            SettingRow(title: "Bass to LFE", caption: "Low-passed mono bass on its own channel") {
-                                Switch(isOn: binding(\.upmix.generateLFE), size: 0.85)
-                            }
-                        }
-                    }
+            if Panel.snapshotting {
+                list
+            } else {
+                Rectangle().fill(Theme.hairline).frame(height: 1)
+                ScrollView(.vertical) {
+                    list.padding(.top, 12).padding(.bottom, 14)
                 }
-
-                VStack(alignment: .leading, spacing: 8) {
-                    SectionLabel(text: "Output")
-                    Card {
-                        VStack(spacing: 13) {
-                            TuningSlider(title: "Volume trim", value: binding(\.outputGainDB), range: -12...6) {
-                                String(format: "%+.1f dB", $0)
-                            }
-                            SettingRow(title: "Surround via BlackHole",
-                                       caption: model.loopbackName.map { "\($0) installed · Atmos and 5.1/7.1 keep every channel" }
-                                           ?? "Not installed · stereo only") {
-                                if model.loopbackName == nil {
-                                    GetBlackHole(size: 12)
-                                } else {
-                                    Switch(isOn: Binding(get: { model.useLoopback }, set: { model.useLoopback = $0 }), size: 0.85)
-                                }
-                            }
-                        }
-                    }
-                }
-
-                VStack(alignment: .leading, spacing: 8) {
-                    SectionLabel(text: "General")
-                    Card {
-                        VStack(spacing: 12) {
-                            SettingRow(title: "Listen when Sfera opens") {
-                                Switch(isOn: Binding(get: { model.listenOnLaunch }, set: { model.listenOnLaunch = $0 }), size: 0.85)
-                            }
-                            SettingRow(title: "Open at login") {
-                                Switch(isOn: Binding(get: { model.openAtLogin }, set: { model.openAtLogin = $0 }), size: 0.85)
-                            }
-                        }
-                    }
-                }
-
-                Text(model.loopbackName != nil
-                     ? "Apple Music: set Settings › Playback › Dolby Atmos to Automatic for Atmos mixes. With AirPods, turn their own Spatial Audio off."
-                     : "Apple Music: set Settings › Playback › Dolby Atmos to Off. With AirPods, turn their own Spatial Audio off.")
-                    .font(.system(size: 10.5))
-                    .foregroundStyle(Theme.tertiary)
-                    .fixedSize(horizontal: false, vertical: true)
-                    .padding(.horizontal, 2)
+                .scrollIndicators(.automatic)
+                .frame(height: Panel.settingsHeight)
             }
-            .padding(.horizontal, 14)
 
-            Rectangle().fill(Theme.hairline).frame(height: 1).padding(.top, 14)
+            Rectangle().fill(Theme.hairline).frame(height: 1).padding(.top, Panel.snapshotting ? 14 : 0)
             HStack {
                 QuietButton(title: "Reset tuning", systemImage: "arrow.counterclockwise") { model.resetTuning() }
                 Spacer()
@@ -298,5 +253,67 @@ private struct SettingsPage: View {
             .padding(.horizontal, 8)
             .padding(.vertical, 6)
         }
+    }
+
+    private var list: some View {
+        VStack(alignment: .leading, spacing: 14) {
+            VStack(alignment: .leading, spacing: 8) {
+                SectionLabel(text: "Stereo upmix")
+                Card {
+                    VStack(spacing: 13) {
+                        TuningSlider(title: "Centre", value: binding(\.upmix.centerExtraction))
+                        TuningSlider(title: "Width", value: binding(\.upmix.width))
+                        TuningSlider(title: "Surround", value: binding(\.upmix.surround))
+                        TuningSlider(title: "Height", value: binding(\.upmix.height))
+                        SettingRow(title: "Bass to LFE", caption: "Low-passed mono bass on its own channel") {
+                            Switch(isOn: binding(\.upmix.generateLFE), size: 0.85)
+                        }
+                    }
+                }
+            }
+
+            VStack(alignment: .leading, spacing: 8) {
+                SectionLabel(text: "Output")
+                Card {
+                    VStack(spacing: 13) {
+                        TuningSlider(title: "Volume trim", value: binding(\.outputGainDB), range: -12...6) {
+                            String(format: "%+.1f dB", $0)
+                        }
+                        SettingRow(title: "Surround via BlackHole",
+                                   caption: model.loopbackName.map { "\($0) installed · Atmos and 5.1/7.1 keep every channel. macOS shows the mic indicator while Sfera reads it." }
+                                       ?? "Not installed · stereo only") {
+                            if model.loopbackName == nil {
+                                GetBlackHole(size: 12)
+                            } else {
+                                Switch(isOn: Binding(get: { model.useLoopback }, set: { model.useLoopback = $0 }), size: 0.85)
+                            }
+                        }
+                    }
+                }
+            }
+
+            VStack(alignment: .leading, spacing: 8) {
+                SectionLabel(text: "General")
+                Card {
+                    VStack(spacing: 12) {
+                        SettingRow(title: "Listen when Sfera opens") {
+                            Switch(isOn: Binding(get: { model.listenOnLaunch }, set: { model.listenOnLaunch = $0 }), size: 0.85)
+                        }
+                        SettingRow(title: "Open at login") {
+                            Switch(isOn: Binding(get: { model.openAtLogin }, set: { model.openAtLogin = $0 }), size: 0.85)
+                        }
+                    }
+                }
+            }
+
+            Text(model.loopbackName != nil
+                 ? "Apple Music: set Settings › Playback › Dolby Atmos to Automatic for Atmos mixes. With AirPods, turn their own Spatial Audio off."
+                 : "Apple Music: set Settings › Playback › Dolby Atmos to Off. With AirPods, turn their own Spatial Audio off.")
+                .font(.system(size: 10.5))
+                .foregroundStyle(Theme.tertiary)
+                .fixedSize(horizontal: false, vertical: true)
+                .padding(.horizontal, 2)
+        }
+        .padding(.horizontal, 14)
     }
 }

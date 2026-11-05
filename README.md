@@ -20,7 +20,7 @@ Spatial audio for headphones, from the menu bar. Turn it on and everything your 
 open Sfera.app
 ```
 
-Sfera has no window and no Dock icon. It lives in the menu bar (headphones icon: outline = off, ring = on, filled = spatial). Click it for the panel:
+Sfera has no window and no Dock icon. It lives in the menu bar (headphones icon: outline = off, ring = on, filled = spatial). Right-click it for Turn On/Off, Spatial and **Quit**. Click it for the panel:
 
 - **The switch** turns listening on and off. Off hands the Mac's sound back exactly as it was.
 - **The sound field** shows what you're hearing. Teal dots are the channels that are really arriving (5.1, 7.1, Atmos). Violet dots are the virtual speakers the stereo upmix creates.
@@ -34,7 +34,7 @@ How much Sfera can hear depends on whether [BlackHole 16ch](https://existential.
 |---|---|---|
 | How it hears your Mac | Sfera makes BlackHole the system output while it runs and plays the result to your real headphones/DAC. Your previous output comes back when Sfera stops or quits. | A Core Audio process tap on everything except Sfera. |
 | What arrives | Every channel apps send: Apple Music Atmos as a 9.1.6 bed, a video player's 5.1/7.1, or stereo | Stereo only (macOS folds surround down first) |
-| Permission | *Microphone* (macOS counts BlackHole as a microphone; nothing is recorded) | *Screen & System Audio Recording* |
+| Permission | *Microphone*: macOS counts BlackHole as a microphone, so the orange mic indicator shows while Sfera reads it. Nothing is recorded and your real microphone isn't touched. | *Screen & System Audio Recording* |
 | Apple Music › Dolby Atmos | **Automatic** or **Always On** | **Off** (otherwise you'd hear Apple's own headphone render) |
 
 The Mac's output menu (menu bar › Sound) stays the switch while Sfera runs. Choose your headphones/DAC and Sfera plays stereo straight to it, leaving the output where you put it. Choose BlackHole again for surround. If the BlackHole route can't start, Sfera falls back to stereo on your real device, never to silence. Routing decisions are logged to `~/Library/Logs/Sfera.log`.

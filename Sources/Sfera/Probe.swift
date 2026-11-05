@@ -30,6 +30,8 @@ enum Probe {
         let model = Controller(persisting: false)
         model.preview(page)
         model.panelPage = page == "settings" ? .settings : .main
+        if CommandLine.arguments.contains("--window") { windowSnapshot(model: model, path: path); return }
+        Panel.snapshotting = true
         let view = Panel(model: model)
         let renderer = ImageRenderer(content: view)
         renderer.scale = 2
@@ -39,6 +41,24 @@ enum Probe {
         }
         do { try png.write(to: URL(fileURLWithPath: path)) } catch { print("snapshot: \(error)"); exit(1) }
         print("snapshot: \(path) (\(Int(image.size.width))×\(Int(image.size.height)) pt)")
+    }
+
+    /// Renders the panel exactly as the popover hosts it (real AppKit views, scroll views
+    /// included) in an off-screen window.
+    @MainActor
+    static func windowSnapshot(model: Controller, path: String) {
+        let host = NSHostingController(rootView: Panel(model: model))
+        host.sizingOptions = [.preferredContentSize]
+        let window = NSWindow(contentViewController: host)
+        window.appearance = NSAppearance(named: .darkAqua)
+        window.setFrameOrigin(NSPoint(x: -4000, y: -4000))
+        window.orderFrontRegardless()
+        RunLoop.main.run(until: Date().addingTimeInterval(0.5))
+        let view = host.view
+        guard let rep = view.bitmapImageRepForCachingDisplay(in: view.bounds) else { print("snapshot: failed"); exit(1) }
+        view.cacheDisplay(in: view.bounds, to: rep)
+        try? rep.representation(using: .png, properties: [:])?.write(to: URL(fileURLWithPath: path))
+        print("snapshot (window): \(path) (\(Int(view.bounds.width))×\(Int(view.bounds.height)) pt)")
     }
 
     // MARK: BlackHole round trip
