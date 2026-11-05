@@ -4,40 +4,32 @@ set -euo pipefail
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 cd "$ROOT"
 
-PLUGIN="/Library/Developer/CommandLineTools/usr/lib/swift/host/plugins/testing/libTestingMacros.dylib"
-
 echo "▸ build (debug + release)"
 swift build
 swift build -c release
-
 BIN="$(swift build -c release --show-bin-path)/Sfera"
 
-echo "▸ engine tests"
-if [ -f "$PLUGIN" ]; then
-  swift test -Xswiftc -load-plugin-library -Xswiftc "$PLUGIN"
-else
-  echo "  swift-testing macro plugin not found; skipping framework tests"
-fi
+echo "▸ engine equivalence + CPU vs the previous engine (Bench/)"
+Bench/run.sh
 
-echo "▸ headless self-check (upmix, binaural room, adaptive surround switch, movies)"
-mkdir -p docs/screenshots
-"$BIN" --self-check docs/self-check.json
-
-echo "▸ movie playback sync (real audio device, output at −90 dB)"
-"$BIN" --movie-probe | tail -1
-
-echo "▸ BlackHole surround round trip (needs BlackHole + microphone permission)"
+echo "▸ BlackHole surround round trip (needs BlackHole + microphone permission; output at −90 dB)"
 if "$BIN" --surround-probe; then :; else
   echo "  (not fatal: run '$BIN --surround-probe' from Terminal to check the BlackHole route)"
 fi
 
-echo "▸ app routing: BlackHole → your output → BlackHole → stop (Sfera at −90 dB)"
+echo "▸ app routing: start → pick your output → pick BlackHole → stop (Sfera at −90 dB)"
 if "$BIN" --route-probe; then :; else
   echo "  (not fatal: see ~/Library/Logs/Sfera.log)"
 fi
 
+echo "▸ system tap (no BlackHole route; output at −90 dB)"
+if "$BIN" --tap-probe; then :; else
+  echo "  (not fatal: run '$BIN --tap-probe' from Terminal; restricted shells get no tap callbacks)"
+fi
+
 echo "▸ snapshots"
-for page in listen listen-tip listen-files listen-movie; do
+mkdir -p docs/screenshots
+for page in atmos stereo stereo-tap original off settings; do
   "$BIN" --snapshot "docs/screenshots/$page.png" --page "$page" >/dev/null
 done
 

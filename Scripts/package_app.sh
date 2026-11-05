@@ -7,7 +7,7 @@ cd "$ROOT"
 CONFIG="${1:-release}"
 APP="$ROOT/Sfera.app"
 BUNDLE_ID="dev.sfera.renderer"
-VERSION="0.9.0"
+VERSION="1.0.0"
 
 echo "▸ building ($CONFIG)"
 swift build -c "$CONFIG"
@@ -48,28 +48,10 @@ cat > "$APP/Contents/Info.plist" <<PLIST
   <key>LSMinimumSystemVersion</key><string>15.0</string>
   <key>LSApplicationCategoryType</key><string>public.app-category.music</string>
   <key>NSHighResolutionCapable</key><true/>
-  <key>NSSupportsAutomaticGraphicsSwitching</key><true/>
   <key>NSHumanReadableCopyright</key><string>Spatial audio for headphones. Not affiliated with Dolby Laboratories.</string>
-  <key>CFBundleDocumentTypes</key>
-  <array>
-    <dict>
-      <key>CFBundleTypeName</key><string>Audio</string>
-      <key>CFBundleTypeRole</key><string>Viewer</string>
-      <key>LSHandlerRank</key><string>Alternate</string>
-      <key>LSItemContentTypes</key>
-      <array><string>public.audio</string></array>
-    </dict>
-    <dict>
-      <key>CFBundleTypeName</key><string>Movie</string>
-      <key>CFBundleTypeRole</key><string>Viewer</string>
-      <key>LSHandlerRank</key><string>Alternate</string>
-      <key>LSItemContentTypes</key>
-      <array><string>public.movie</string></array>
-    </dict>
-  </array>
+  <key>LSUIElement</key><true/>
   <key>NSAudioCaptureUsageDescription</key><string>Sfera listens to Apple Music (or other apps) so it can spatialise them live for your headphones. Audio never leaves your Mac.</string>
   <key>NSMicrophoneUsageDescription</key><string>macOS counts BlackHole as a microphone. Sfera reads it only to spatialise the surround and Atmos audio your apps play into it. Nothing is recorded and audio never leaves your Mac.</string>
-  <key>NSAppleEventsUsageDescription</key><string>Sfera can open a rendered masters in your audio applications.</string>
 </dict>
 </plist>
 PLIST

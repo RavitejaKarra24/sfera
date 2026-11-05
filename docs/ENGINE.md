@@ -2,21 +2,13 @@
 
 Everything here is implemented from published references. No Dolby code, symbols, or DSP was copied, extracted, or reconstructed.
 
-## Coordinates
+## Speakers
 
-Objects use the Renderer's documented field: `x ∈ [-1, 1]` left→right, `y ∈ [-1, 1]` front→back, `z ∈ [0, 1]` floor→ceiling.
-
-```
-azimuth   = atan2(x, −y) · 180/π            (0° front, +90° right)
-elevation = asin(z) · 180/π · (60/90)       (ceiling → 60°)
-radius    = min(1, √(x² + y²))
-```
-
-Bed channels sit at nominal monitoring angles (L/R ±30°, C 0°, Ls/Rs ±110°, Lss/Rss ±90°, Lrs/Rrs ±135°, heights 45°/55°).
+Channels sit at nominal monitoring angles (azimuth positive right, 0° front): C 0°, L/R ±30°, Lw/Rw ±60°, Lss/Rss ±90°, Lrs/Rrs ±135°. The heights are front ±30° and rear ±135° at 45° elevation, front-height centre 0° at 45°, and top centre at 60°. `Layout.swift` lists them in BlackHole's 16-channel order (L R C LFE Lss Rss Lrs Rrs Lw Rw Ltf Rtf Ts Vhc Ltr Rtr).
 
 ## Stereo → spatial upmix
 
-`Render/Upmixer.swift`. STFT with N = 2048, hop 512, periodic Hann on analysis and synthesis (Σw² = 1.5). Each bin keeps an exponentially smoothed covariance (τ = 40 ms):
+`Upmixer.swift`. STFT with N = 2048, hop 512, periodic Hann on analysis and synthesis (Σw² = 1.5). Each bin keeps an exponentially smoothed covariance (τ = 40 ms):
 
 ```
 P = [ pLL  c  ]      c = E[L·R*]
@@ -35,7 +27,7 @@ pan   p = atan2(|v_R|, |v_L|)/(π/4) − 1    |v_L|² = (λ1 − pRR)/(λ1 − �
 
 ## Binaural rendering
 
-`Render/BinauralRenderer.swift`. For each source and each 32-sample block:
+`Binaural.swift`. For each speaker and each 32-sample block:
 
 **1. Interaural time difference (Woodworth)**
 
@@ -64,14 +56,13 @@ Frontal sources stay bright (shadow 0), lateral sources get a 1.2–4 kHz contra
 
 `Gain = −5 dB · (elevation/60)` applied as a peaking EQ at 8.2 kHz (Q 1.3) on both ears — the single-notch model of pinna elevation cues.
 
-**4. Distance and size**
+**4. Distance**
 
 ```
 distance gain = 1 / (1 + 0.7·radius) · 10^(distanceModel dB/20)
-size blender  = dry·(1 − 0.35·size) + tap(delay 6–16 samples)·0.35·size
 ```
 
-**5. Render mode and virtual room** (`Render/BinauralRoom.swift`)
+**5. Render mode and virtual room** (`Room.swift`)
 
 | Mode | Direct path | Room send |
 |---|---|---|
@@ -88,57 +79,34 @@ Bass-managed at the crossover (default 80 Hz) and folded into both ears at +5.5 
 
 Output then passes the look-ahead limiter (−1.5 dB threshold, −0.3 dB ceiling, 2 ms look-ahead, 160 ms release) and the output gain stage.
 
-## Loudness (ITU-R BS.1770-4)
+## Real-time chain
 
-K-weighting is the standard two-stage filter (high shelf +4 dB @ 1.68 kHz, high-pass 38 Hz); at 48 kHz the reference coefficients are used verbatim, otherwise RBJ designs are substituted.
+`Spatializer.swift` takes 2–16 planar input channels and returns binaural stereo. It never allocates or blocks on the audio thread. Settings arrive through an `OSAllocatedUnfairLock` that the render thread only tries (`withLockIfAvailable`), and meters go out through atomics.
 
-```
-block loudness  = −0.691 + 10·log₁₀(Σ_ch w_ch · mean(z²))
-channel weights = 1.0 (L/R/C), 1.41 (surround/height), 0 (LFE)
-gating          = 400 ms blocks, 75 % overlap
-                  absolute gate −70 LUFS, relative gate (mean − 10 LU)
-integrated      = −0.691 + 10·log₁₀(mean energy of gated blocks)
-LRA             = 95th − 10th percentile of gated 3 s short-term values
-true peak       = 4× polyphase windowed-sinc interpolation around local maxima
-```
+**What's arriving.** Per block, every channel whose peak is over −80 dBFS is marked active. A channel stays active for 3 s after its last signal. If anything beyond L/R is active, the bed is rendered from its own channels; otherwise channels 1–2 are upmixed. The same mask names the format: any height → "Atmos", wides/rears → "7.1", sides → "5.1", C/LFE → "3.1", else "Stereo".
 
-## ADM import (ITU-R BS.2076)
+**One renderer for both paths.** The upmix has 2048 samples of latency, so every input goes through a 2048-sample delay line. Bed and upmix then become time-aligned feeds for the same speaker slots. A switch crossfades the *feeds* (one-pole, 50 ms) into a single head renderer, room and limiter. 0.9 ran two complete chains and crossfaded their outputs, so the arithmetic differs at about −83 dB (see VALIDATION).
 
-ADM BWF masters can be played as files. BS.2076 azimuth is positive anticlockwise (left) and Cartesian Y = +1 is front; internally azimuth is positive right and y = −1 is front, converted at the boundary. A tree-based XML walk resolves `audioProgramme → audioContent → audioObject → audioPackFormat/audioChannelFormat → audioBlockFormat`. Positions accept Cartesian and spherical forms, `rtime`/`duration` become keyframes, and `chna` binds each object to its WAV track.
+**Original.** The A/B path folds the delayed inputs to stereo: front L/R at unity, centre and everything else at −3 dB to its side, LFE dropped, normalised when more than two channels are summed. It then applies the makeup for the current room mode (Off +0.4, Near +0.9, Mid +2.3, Far +4.9 dB, measured to BS.1770 in 0.9) and crossfades with Spatial over 30 ms. It's computed only while it's audible.
 
-## Live listening
+**Limiter.** −1.5 dB threshold, −0.3 dB ceiling, 2 ms look-ahead (monotonic-deque window minimum), 160 ms release. While Original plays on its own, it only catches overs above 0 dBFS.
 
-`Live/StreamingUpmixer.swift` is the same PCA upmix as `Upmixer`, restructured to allocate nothing on the audio thread: fixed STFT buffers, per-speaker overlap-add rings, a 2048-sample latency. `Upmixer.upmix` is now a wrapper around it, so offline and live output are the same code.
+### Doing less work
 
-`Live/LiveSpatializer.swift` chooses a path from the input layout: stereo/mono → upmix → binaural; multichannel beds → binaural directly; a 2-channel "BIN" layout passes through. Each virtual speaker uses the precomputed HRTF cue (`BinauralRenderer.cue`) and distance gain, and the room send feeds a streaming `BinauralRoomProcessor`. The Original path is delayed by the same latency and folded to stereo, and makeup gains (measured: Off +0.4, Near +0.9, Mid +2.3, Far +4.9 dB) keep Spatial and Original at equal BS.1770 loudness. Switching crossfades over 30 ms. A 2 ms look-ahead limiter (monotonic-deque window minimum) protects the output. Settings reach the render thread through an `OSAllocatedUnfairLock` read with `withLockIfAvailable`, so the audio thread never blocks.
+- **Speaker groups.** Speakers at the same azimuth (e.g. L and Ltf) get the same ITD and shadow, so their elevation-filtered feeds are summed first and share one delay line and one shadow filter per ear. The elevation notch is the same on both ears, so it runs once per height bus, not twice.
+- **Sleeping parts.** A speaker group or height bus stops computing after 1 s of exact silence; the LFE path and the room after 3 s. They restart from a cleared state, which is where their decaying state was heading anyway.
+- **Upmix sleeps during surround.** While a bed is playing and the 3 s hold can't expire within 0.5 s, the upmixer doesn't run. It's reset and woken 0.5 s before it could be needed, which is enough to refill its 2048-sample frame and overlap-add history.
+- **Dormant.** After 3 s of digital silence the whole chain stops, apart from the input level check, and writes silence. The first non-zero sample wakes it.
+- **Vectorised upmix analysis.** Per hop, the covariance update and the 2×2 eigen-solve run 8 bins at a time with SIMD8 and no branches. Pan angles use `vvatan2f`, the constant-power pan pair uses one `vvsincosf`, ambience decorrelation is `vDSP_zvmul`, and unused outputs skip their inverse FFT.
 
-The app side (`Sources/Sfera/Live`): `SystemAudioCapture` creates a Core Audio process tap (`CATapDescription`, muted when tapped) on every process except Sfera, wraps it in a private aggregate device and writes its IOProc buffers into `AudioRingBuffer` (lock-free SPSC with priming and bounded backlog). `LiveOutput` pulls from the ring (or from an in-memory `FilePlayback`) through an `AVAudioSourceNode`.
+**Glides that finish.** 0.9 moved gains with `w += (t − w)·c`. In Float that stalls a few ULPs short of the target, which left the upmix at −83 dB under Atmos and the limiter 0.002 dB below unity. Glides now track the remaining distance (`d *= r; w = t − d`) and snap to the target when `|d| < 1e−6`.
 
-## Surround from other apps (BlackHole)
+## Audio path
 
-A process tap only hears what macOS has already folded to stereo. For real surround, Sfera uses BlackHole 16ch the way Downmix does:
+`Sources/Sfera/Session.swift`. One private aggregate device and one IOProc:
 
 1. **Layout.** `LoopbackLayout.install` sets BlackHole's preferred channel layout on both scopes to L R C LFE Ls Rs Lrs Rrs Lw Rw Ltf Rtf Ts Vhc Ltr Rtr. Players (Music, IINA, QuickTime) then send every bed channel instead of a stereo fallback. These are the same labels as Downmix.
-2. **Rates.** Both devices are set to the loopback's rate (what the player picked) if the output supports it, otherwise to the output's rate. A BlackHole rate change restarts the route.
-3. **Capture.** `SurroundCapture` builds a private aggregate device: main sub-device = your real output (the clock), plus BlackHole with drift compensation. Its IOProc skips the output's own input streams and writes BlackHole's interleaved channels into a 16-channel `AudioRingBuffer` (2048-frame target).
-4. **Routing.** The system default output becomes BlackHole; Sfera's `AVAudioEngine` output unit is pinned to the real device with `setDeviceID`. The previous default is saved (`listen.restoreOutputUID`) and restored on stop, on quit, or on the next launch after a crash. If you pick another physical output while Sfera runs, Sfera adopts it and moves the default back to BlackHole.
-
-`AdaptiveSpatializer` sits between the ring and the output. It runs two `LiveSpatializer`s on the same input: a stereo one on channels 1–2 (upmix, ≈45 ms) and a bed one on all 16 channels (2 ms). The bed path is delayed by the difference, so both are time-aligned and can crossfade (50 ms) without a jump. Per block, it marks every channel whose peak is over −80 dBFS. If any channel beyond L/R was active within the last 3 s, the bed path is selected; otherwise the stereo path is. The same mask names the format: any height channel → "Atmos", wides/rears → "7.1", sides → "5.1", C/LFE → "3.1", else "Stereo".
-
-## Files and movies
-
-`Live/StreamingFile.swift` streams the audio track of anything AVFoundation can read. When a file has several audio tracks, it picks the one with the most channels, so a film's 5.1 wins over a stereo commentary. A background thread decodes with `AVAssetReader` into an `AudioRingBuffer`, which holds about 2.7 s, so a long movie never sits in memory. Channel order comes from the track's channel-layout tags (AAC stores C L R Ls Rs LFE), and every channel becomes a speaker in the binaural renderer.
-
-Seeking is lock-free: the main thread bumps a generation counter; the decoder stops and acknowledges; the render thread flushes and acknowledges; the decoder restarts there. After a seek the render thread waits for 4096 frames before playing, so the first callback can't underrun and click. WAV/BWF go through Sfera's own parser instead (for ADM objects); other unreadable formats fall back to the ffmpeg importer.
-
-Movies: `VideoWindowController` shows the picture with a muted `AVPlayer`. Each render cycle that plays a full buffer records the pair (item frame, IO host time). From that, `LiveOutput.audibleTime(atHostTime:)` subtracts the spatializer look-ahead and the device + stream latency Core Audio reports, which gives the item time reaching the ears at any host time. The player is then locked with `setRate(1, time:atHostTime:)`. It is re-locked only after a seek, a pause, or more than 20 ms of drift.
-
-## Verification anchors
-
-- Binaural: right-side source produces higher right-ear energy and an earlier right-ear peak; both asserted in tests.
-- Upmix (`SpatialDiagnostics`): centre-panned tone lands in C (+7.7 dB over L/R at default, +42 dB at full extraction); hard-left tone stays left (> 60 dB); direct leak to surrounds −50 dB; side vs rear ambience max cross-correlation 0.10 over ±30 ms; energy balance +0.8 dB; bypass reconstruction −137 dB.
-- Room: tail energy (50–400 ms vs direct) −30.7 / −24.7 / −19.7 dB for Near / Mid / Far; dry render has none; Off mode is identical in both ears for a centred source.
-- Live: streaming chain matches offline upmix + render to −106 dB; Spatial vs Original within 0.05 LU in every room mode.
-- Adaptive: stereo on a 16-channel input is identical to the stereo path (−337 dB); centre noise switches to the bed path with 0.0 dB balance and is named "3.1"; heights are named "Atmos"; it returns to stereo after the hold.
-- Limiter: 2.0 full-scale input never exceeds the −0.3 dB ceiling; quiet material passes bit-near-transparent.
-- Loudness: a −20 dBFS 1 kHz stereo tone measures −20.0 LUFS ±1.5 and −20.6 dBTP.
+2. **Rates.** Both devices are set to the loopback's rate (what the player picked) if the output supports it, otherwise to the output's rate. A rate change restarts the session.
+3. **Aggregate.** The main sub-device is your real output (the clock). The second member is BlackHole with drift compensation, or, without BlackHole, a process tap (`CATapDescription` on every process except Sfera, muted when tapped). `kAudioDevicePropertyIOProcStreamUsage` switches off the streams Sfera doesn't use (a headset's microphone, BlackHole's output side), so Core Audio doesn't move them.
+4. **IO cycle.** The IOProc deinterleaves the input into the spatializer's planar buffers (`vDSP_vsmul` with a stride), renders, and writes L/R straight to the output stream (interleaved, planar or mono). There's no ring buffer and no AVAudioEngine, which saves 0.9's 2048-frame ring buffer (about 43 ms) and a thread hop.
+5. **Routing** (`Controller.swift`). The system default output becomes BlackHole and the previous default is saved (`listen.restoreOutputUID`). It's restored on stop, on quit, or on the next launch after a crash. If you pick another physical output while Sfera runs, Sfera plays stereo to it and leaves your choice alone. Core Audio property listeners (default output, device list, rate, device alive) drive all of this, and a 1 Hz watchdog restarts a session whose IO stops for 3 s.

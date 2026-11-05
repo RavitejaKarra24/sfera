@@ -6,21 +6,13 @@ let package = Package(
     platforms: [.macOS(.v15)],
     products: [
         .executable(name: "Sfera", targets: ["Sfera"]),
-        .library(name: "SpatialCore", targets: ["SpatialCore"]),
+        .library(name: "SferaCore", targets: ["SferaCore"]),
     ],
     targets: [
-        .target(
-            name: "SpatialCore",
-            swiftSettings: [.swiftLanguageMode(.v5)]
-        ),
+        .target(name: "SferaCore", swiftSettings: [.swiftLanguageMode(.v5)]),
         .executableTarget(
             name: "Sfera",
-            dependencies: ["SpatialCore"],
-            swiftSettings: [.swiftLanguageMode(.v5)]
-        ),
-        .testTarget(
-            name: "SpatialCoreTests",
-            dependencies: ["SpatialCore"],
+            dependencies: ["SferaCore"],
             swiftSettings: [.swiftLanguageMode(.v5)]
         ),
     ]
