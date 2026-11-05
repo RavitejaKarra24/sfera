@@ -1,0 +1,7 @@
+.build/
+.swiftpm/
+Sfera.app/
+Icon.png
+Icon.iconset/
+docs/self-check.json
+.DS_Store
