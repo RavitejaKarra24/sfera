@@ -264,10 +264,35 @@ private struct SettingsPage: View {
                         Segmented(options: Renderer.allCases.map { ($0, $0.label) }, selection: binding(\.renderer), height: 26)
                         Text(model.settings.renderer == .classic
                              ? "Sfera 1.0's sound, unchanged."
-                             : "Truer rear and height placement, panned sources at their real level, bass steady across rooms.")
+                             : "Truer rear and height placement, a room that answers each speaker, bass steady across rooms.")
                             .font(.system(size: 10.5))
                             .foregroundStyle(Theme.tertiary)
                             .fixedSize(horizontal: false, vertical: true)
+                    }
+                }
+            }
+
+            if model.settings.renderer == .refined {
+                VStack(alignment: .leading, spacing: 8) {
+                    SectionLabel(text: "Room")
+                    Card {
+                        VStack(alignment: .leading, spacing: 13) {
+                            Segmented(options: RoomSize.allCases.map { ($0, $0.label) }, selection: binding(\.room.size), height: 26)
+                            TuningSlider(title: "Decay", value: binding(\.room.decay), range: RoomSettings.decayRange) {
+                                String(format: "%.2f s", $0)
+                            }
+                            TuningSlider(title: "Early reflections", value: binding(\.room.early), range: RoomSettings.levelRange) {
+                                String(format: "%+.1f dB", $0)
+                            }
+                            TuningSlider(title: "Reverb tail", value: binding(\.room.late), range: RoomSettings.levelRange) {
+                                String(format: "%+.1f dB", $0)
+                            }
+                            TuningSlider(title: "Bass in room", value: binding(\.room.bass))
+                            Text("Near, Mid and Far set how much of the room you hear.")
+                                .font(.system(size: 10.5))
+                                .foregroundStyle(Theme.tertiary)
+                                .fixedSize(horizontal: false, vertical: true)
+                        }
                     }
                 }
             }

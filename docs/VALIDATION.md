@@ -25,7 +25,7 @@ Every comparison in the bench fails on any non-finite sample, and a failed build
 
 **Known defect: limiter release stalls at −0.002 dB.** After a limited burst, quiet material comes out 0.99977× (−0.002 dB) for good. The release rebuilds its distance to unity from the rounded Float gain every sample, so it stalls where one step is smaller than half a Float ULP, at 1 − 2.3·10⁻⁴. That is 0.9's stall, and the comment in `Limiter.process` claiming otherwise is wrong. The bench reports it as a known defect (⚠, not a failure) and will say when it passes. The amount is far below audibility.
 
-## 3. Refined renderer and switching
+## 3. Refined renderer, its room, and switching
 
 `Bench/run.sh --refined` runs the Classic gate plus these; the full bench runs them too. Values from 2026-11-05.
 
@@ -33,22 +33,40 @@ Every comparison in the bench fails on any non-finite sample, and a failed build
 |---|---|---|
 | ITD model at 0° / 90° / 135° / 180° | 0 / 0.656 / 0.781 / 0.000 ms | 0 / 0.656 / 0.381 / 0 ms |
 | Rendered interaural lag (cross-correlation of an impulse): L, Lss, Lrs, Ltf, Ltr, C, Cts | 0.27, 0.67, 0.79, 0.27, 0.79, 0, 0 ms | 0.27, 0.67, 0.39, 0.19, 0.27, 0, 0 ms; Rrs mirrors Lrs |
-| Room: back wall / ceiling reflection ITD | 19 / 0 samples | 0 / 0 |
 | Upmix level vs input: hard left, centre, half left (default tuning) | +2.49, 0.00, +2.21 dB | 0.00, 0.00, 0.00 dB (also at Centre 1, Width 1) |
 | New rear-only event in a bed, first 30 ms | −2.78 dB | 0.00 dB |
-| LFE vs centre at 45 Hz, Dry / Near / Mid / Far | +6.7 / +5.1 / +6.6 / +9.5 dB | +9.7 / +9.6 / +9.6 / +9.5 dB (spread 0.16, limit 0.25) |
-| Quiet after a limited burst | −72.8 dB (known stall) | −138.3 dB |
+| LFE vs centre at 45 Hz, Dry / Near / Mid / Far | +6.7 / +5.1 / +6.6 / +9.5 dB | +9.7 / +9.6 / +9.6 / +9.6 dB (spread 0.12, limit 0.25; same with default bass in room) |
+| Quiet after a limited burst (5.1 bed) | −72.8 dB (known stall) | −134.8 dB |
+
+**Room** (Far, impulse responses of the head renderer + room, default room settings):
+
+| Check | Classic | Refined |
+|---|---|---|
+| Room energy, 0–50 ms / after 50 ms, ten bed speakers | reference | +0.01 / +0.30 dB (limit ±1) |
+| T30 at 125 / 500 / 1k / 2k / 4k / 8k Hz | 0.41 0.42 0.40 0.38 0.32 0.26 s | 0.52 0.50 0.45 0.38 0.31 0.23 s |
+| Decay setting vs measured at 1 kHz (limit ±12 %; 125 Hz ≥ 1.1×, 8 kHz ≤ 0.8×) | — | Medium 0.45 → 0.45 s; Small 0.45 → 0.46; Medium 0.8 → 0.80; Large 0.8 → 0.80 |
+| Similarity of early reflections (0–30 ms, zero-lag correlation): Lss/Lrs, L/Lss, C/Cts | 0.98, 0.94, 1.00 | 0.26, 0.28, −0.01 (limit 0.5) |
+| C: left and right ear reflections; Lrs vs Rrs mirrored | — | bit-identical; bit-identical |
+| Reflections per speaker | 8 shared | 6 per speaker × 15 speakers, each with a ceiling and a floor reflection |
+| Median reflection delay for L, Small / Medium / Large | — | 5.4 / 7.4 / 11.9 ms |
+| Tail energy at 63 Hz re Classic, bass in room 0 / 0.5 / 1 | — | −1.1 / +7.1 / +10.5 dB |
+| Elevation filter at 45°, 7 / 8.2 / 10.1 kHz | −3.0 / −3.7 / −2.5 dB | +3.0 / +0.9 / −5.0 dB; 0 dB at the ear plane; the notch moves up with elevation |
+| Direct path, ten bed speakers | reference | −0.89 dB (heights now equidistant) |
+
+Changing the room while a 100 Hz tone plays (same metric as below): size Medium → Large ×1.02, → Small ×1.01, decay 0.45 → 1.2 s ×0.98, early −12 dB and tail +6 dB ×1.00, bass 0.5 → 1 ×1.03. After a size change the old room is gone (−146.9 dB re signal on a 5.1 bed; without the change it would still be at −6.8 dB). Refined Far runs finite and limited at 44.1 kHz (irregular blocks ≤ 1024), 96 kHz (≤ 256) and 192 kHz (4096-frame blocks), stereo and 9.1.6, every room size.
 
 **Switching.** A 100 Hz tone with a change at 2 s; the largest sample-to-sample step within 43 ms before to 125 ms after it, relative to the largest step in a steady stretch before (1–1.9 s) or after (2.6–3.5 s). A discontinuity shows as ×2 and more; the dip and the room building up again move the level smoothly and stay under the ×1.25 limit.
 
 | Change | 1.0 (`d18a518`) | Classic now | Refined |
 |---|---|---|---|
-| Far → Mid | ×2.10 | ×1.09 | ×1.09 |
+| Far → Mid | ×2.10 | ×1.09 | ×1.01 |
 | Far → Dry | ×7.95 | ×1.00 | ×1.00 |
-| Dry → Far | ×11.09 | ×1.10 | ×1.11 |
-| Far: Classic ↔ Refined | — | ×1.15 | ×1.15 |
+| Dry → Far | ×11.09 | ×1.10 | ×1.05 |
+| Far: Classic → Refined / Refined → Classic | — | ×1.05 / ×1.02 | |
 
-**No stale room.** Far with loud noise, Dry with a quiet tone for 2 s, then Far again, compared with the same run starting from silence: the old room returned at −13.7 dB re signal in 1.0, now −262 dB (both renderers).
+**No stale room.** Far with loud noise on a 5.1 bed, Dry with a quiet tone for 2 s, then Far again, compared with the same run starting from silence: −334 dB (Classic), −269 dB (Refined). In 1.0 the old room returned at −13.7 dB re signal (stereo).
+
+**Why the stale-room and limiter checks use a 5.1 bed.** On stereo, the upmixer's steering still remembers loud material for a few seconds, so the stereo versions differ by −108 dB (stale room) and −102 dB (limiter) on Refined, whose per-speaker reflections expose small steering differences that Classic's two-bus room averaged out (Classic: −262 dB). Shrinking the old noise by 60 dB removes the difference entirely (−323 dB), so it is that state, not the room or limiter; the bench prints the stereo figures for reference.
 
 The gate in §2 has no mid-stream room or renderer changes, so the new switching behaviour (which also applies to Classic) doesn't affect it.
 
@@ -90,6 +108,8 @@ Same bench: one core, release build, 512-frame blocks. Per second of audio:
 | 5.1 film via BlackHole | 3.55 % | 0.22 % | 16× less |
 | 9.1.6 Atmos via BlackHole | 3.57 % | 0.32 % | 11× less |
 | Nothing playing | 2.53 % | 0.08 % | 30× less |
+
+Those are the Classic renderer. Refined (its own room with per-speaker reflections): stereo 1.06 % vs Classic 0.72 %, 9.1.6 Atmos 0.66 % vs 0.32 %.
 
 These count the DSP only. The app adds less on top than 0.9 did: no ring buffer, no AVAudioEngine, no second thread hop, no always-on 20 Hz UI timer.
 

@@ -76,6 +76,24 @@ struct Cue {
         panR = Float(sin(panAngle))
     }
 
+    /// Refined elevation cue, relative to the ear plane: the pinna's first notch moves up with
+    /// elevation (≈ 6.5–7 kHz in front, ≈ 10–11 kHz at 60°; Iida et al. 2007), so a raised
+    /// source gains energy around 7 kHz (Blauert's "above" band) and loses it higher up.
+    /// Below the ear plane the notch moves down instead. Identity at 0°.
+    static func elevationFilters(elevation: Double, sampleRate: Double) -> (Biquad, Biquad) {
+        let e = min(max(elevation / 60, -1), 1)
+        if e >= 0 {
+            return (.peaking(7000, gainDB: 5 * e, q: 1.8, sampleRate: sampleRate),
+                    .peaking(8000 * (1 + 0.35 * e), gainDB: -8 * e, q: 3, sampleRate: sampleRate))
+        }
+        return (.peaking(7000, gainDB: 3 * e, q: 1.8, sampleRate: sampleRate),
+                .peaking(8000 * (1 + 0.3 * e), gainDB: 6 * e, q: 3, sampleRate: sampleRate))
+    }
+
+    /// Refined: every bed speaker is equidistant, as the mix assumes (the ear-plane value of
+    /// `distanceGain`). Classic's elevated speakers came out up to 2.5 dB louder.
+    static let equalDistanceGain = Float(1 / 1.7)
+
     /// 1 / (1 + 0.7·r), r = horizontal radius of the speaker on the unit sphere
     /// (elevated speakers sit closer to the head axis, so they're a little louder).
     static func distanceGain(azimuth: Double, elevation: Double) -> Float {
@@ -154,8 +172,12 @@ final class HeadRenderer {
     private final class Bus {
         let members: [(speaker: Int, distance: Float)]
         var notch: Biquad
+        /// Refined: the moving pinna notch (the boost is `notch`).
+        var extra: Biquad?
         var silentFrames = Int.max
-        init(members: [(Int, Float)], notch: Biquad) { self.members = members; self.notch = notch }
+        init(members: [(Int, Float)], notch: Biquad, extra: Biquad? = nil) {
+            self.members = members; self.notch = notch; self.extra = extra
+        }
     }
 
     private final class Group {
@@ -184,7 +206,7 @@ final class HeadRenderer {
         func reset() {
             stateL = 0; stateR = 0
             farDelay?.reset()
-            for bus in buses { bus.notch.reset() }
+            for bus in buses { bus.notch.reset(); bus.extra?.reset() }
         }
     }
 
@@ -193,6 +215,8 @@ final class HeadRenderer {
     private let groupBuffer: UnsafeMutablePointer<Float>
     private let busBuffer: UnsafeMutablePointer<Float>
     private let idleAfter: Int
+    /// Direction of each chain (azimuth, elevation in degrees), in the order of `groupSends`.
+    let groupDirections: [(azimuth: Double, elevation: Double)]
 
     /// `speakers`: the feeds this renderer can receive (LFE excluded).
     init(speakers: [Speaker], sampleRate: Double, maxFrames: Int, renderer: Renderer = .classic) {
@@ -217,17 +241,24 @@ final class HeadRenderer {
             let azimuth = key.azimuth
             let members = byKey[key]!.sorted { $0.rawValue < $1.rawValue }
             let cue = Cue(azimuth: azimuth, elevation: key.elevation, sampleRate: sampleRate, renderer: renderer)
-            let plain = members.filter { !$0.isHeight }
-                .map { ($0.rawValue, Cue.distanceGain(azimuth: $0.azimuth, elevation: $0.elevation)) }
+            func distance(_ s: Speaker) -> Float {
+                renderer == .classic ? Cue.distanceGain(azimuth: s.azimuth, elevation: s.elevation) : Cue.equalDistanceGain
+            }
+            let plain = members.filter { !$0.isHeight }.map { ($0.rawValue, distance($0)) }
             var byElevation: [Double: [Speaker]] = [:]
             for s in members where s.isHeight { byElevation[s.elevation, default: []].append(s) }
             let buses = byElevation.keys.sorted().map { elevation in
+                let members = byElevation[elevation]!.map { ($0.rawValue, distance($0)) }
+                if renderer == .refined {
+                    let (boost, notch) = Cue.elevationFilters(elevation: elevation, sampleRate: sampleRate)
+                    return Bus(members: members, notch: boost, extra: notch)
+                }
                 let gainDB = Cue(azimuth: azimuth, elevation: elevation, sampleRate: sampleRate, renderer: renderer).notchGainDB
-                return Bus(members: byElevation[elevation]!.map { ($0.rawValue, Cue.distanceGain(azimuth: $0.azimuth, elevation: $0.elevation)) },
-                           notch: .peaking(8200, gainDB: gainDB, q: 1.3, sampleRate: sampleRate))
+                return Bus(members: members, notch: .peaking(8200, gainDB: gainDB, q: 1.3, sampleRate: sampleRate))
             }
             return Group(cue: cue, sampleRate: sampleRate, plain: plain, buses: buses, delayLength: delayLength)
         }
+        groupDirections = byKey.keys.sorted().map { ($0.azimuth, $0.elevation) }
     }
 
     deinit {
@@ -247,14 +278,27 @@ final class HeadRenderer {
     /// Adds the binaural render of `feeds` (indexed by `Speaker.rawValue`; nil = silent)
     /// to `outL/outR`, and the room send to `sendL/sendR`.
     /// `direct`: direct-path level; `send`: room send level (0 = no room).
+    /// `groupSends` (optional): each chain's own mono send, for a room with source-dependent
+    /// reflections; `groupActive[i]` says whether chain i wrote one this block.
     func process(feeds: UnsafePointer<UnsafeMutablePointer<Float>?>, frames: Int,
                  direct: Float, send: Float, dry: Bool,
                  outL: UnsafeMutablePointer<Float>, outR: UnsafeMutablePointer<Float>,
-                 sendL: UnsafeMutablePointer<Float>, sendR: UnsafeMutablePointer<Float>) {
+                 sendL: UnsafeMutablePointer<Float>, sendR: UnsafeMutablePointer<Float>,
+                 groupSends: UnsafePointer<UnsafeMutablePointer<Float>>? = nil,
+                 groupActive: UnsafeMutablePointer<Bool>? = nil) {
         let n = vDSP_Length(frames)
         let gbuf = groupBuffer, bbuf = busBuffer
 
-        for g in groups {
+        for (gi, g) in groups.enumerated() {
+            groupActive?[gi] = false
+            // This chain's own room send (un-notched, like the lateral bus).
+            @inline(__always) func addSend(_ x: UnsafeMutablePointer<Float>) {
+                guard let groupSends, let groupActive, send > 0 else { return }
+                var s = send
+                if groupActive[gi] { vDSP_vsma(x, 1, &s, groupSends[gi], 1, groupSends[gi], 1, n) }
+                else { vDSP_vsmul(x, 1, &s, groupSends[gi], 1, n) }
+                groupActive[gi] = true
+            }
             // Plain members → group buffer.
             var any = false
             for m in g.plain {
@@ -286,6 +330,7 @@ final class HeadRenderer {
             if any, send > 0 {
                 vDSP_vsma(gbuf, 1, &sl, sendL, 1, sendL, 1, n)
                 vDSP_vsma(gbuf, 1, &sr, sendR, 1, sendR, 1, n)
+                addSend(gbuf)
             }
 
             // Elevated members: sum per elevation, shared notch, into the group buffer.
@@ -308,8 +353,10 @@ final class HeadRenderer {
                 if send > 0 {
                     vDSP_vsma(bbuf, 1, &sl, sendL, 1, sendL, 1, n)
                     vDSP_vsma(bbuf, 1, &sr, sendR, 1, sendR, 1, n)
+                    if busAny { addSend(bbuf) }
                 }
                 b.notch.run(bbuf, frames)
+                if b.extra != nil { b.extra!.run(bbuf, frames) }
                 if any { vDSP_vadd(gbuf, 1, bbuf, 1, gbuf, 1, n) } else { gbuf.update(from: bbuf, count: frames) }
                 any = true
             }

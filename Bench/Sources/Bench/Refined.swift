@@ -153,29 +153,43 @@ func refinedSuite() {
             return x
         }
         let lfe = tone(3), centre = tone(2)
-        func balance(_ m: RoomMode, _ r: Renderer) -> Double {
-            let s = settings(m, r)
+        func balance(_ m: RoomMode, _ r: Renderer, bass: Double = 0) -> Double {
+            var s = settings(m, r)
+            s.room.bass = bass
             return ratioDB(energy(rewrite(channels: 16, settings: s)(lfe), seconds(1, 3)),
                            energy(rewrite(channels: 16, settings: s)(centre), seconds(1, 3)))
         }
+        // The design: bass kept out of the room (Refined's room then high-passes like Classic's).
         let modes = RoomMode.allCases
         let ref = balance(.far, .classic)
         let refined = modes.map { balance($0, .refined) }, classic = modes.map { balance($0, .classic) }
+        let withBass = modes.map { balance($0, .refined, bass: RoomSettings().bass) }
         let spread = refined.max()! - refined.min()!
         print("    LFE vs centre at 45 Hz (dB, Dry/Near/Mid/Far): classic " + classic.map { String(format: "%+.1f", $0) }.joined(separator: " ")
-              + " · refined " + refined.map { String(format: "%+.1f", $0) }.joined(separator: " "))
+              + " · refined " + refined.map { String(format: "%+.1f", $0) }.joined(separator: " ")
+              + " · with default bass in room " + withBass.map { String(format: "%+.1f", $0) }.joined(separator: " "))
         expect("LFE: same balance in every room mode", spread < 0.25, String(format: "spread %.2f dB", spread))
         expect("LFE: equal to Classic Far's balance", abs(refined.last! - ref) < 0.05, String(format: "%+.2f vs %+.2f dB", refined.last!, ref))
+        let bassSpread = withBass.max()! - withBass.min()!
+        expect("LFE: bass in room keeps it within 0.5 dB", bassSpread < 0.5, String(format: "spread %.2f dB", bassSpread))
     }
 
     // 5. Limiter returns to unity.
     do {
+        // On a 5.1 bed, so the upmixer (whose steering keeps adapting after loud stereo) is
+        // out of the picture; the stereo figure is printed for reference.
+        let s = settings(.far, .refined)
+        let active = [0, 1, 2, 4, 5]
+        let bedTail = quiet(bed(4, active: active, seed: 9))
+        let bedBurst = bed(2, active: active, seed: 3).map { $0.map { $0 * 3 } }
+        let after = rewrite(channels: 16, settings: s)(concat([bedBurst, bedTail], channels: 16))
+        let clean = rewrite(channels: 16, settings: s)(concat([silence(2, channels: 16), bedTail], channels: 16))
+        check("limiter: quiet after a limited burst is unaffected", compare(clean, after, seconds(4.5, 6)), limit: -120)
         let tail = quiet(stereo(4, seed: 9))
         let burst = stereo(2, seed: 3).map { $0.map { $0 * 3 } }
-        let s = settings(.far, .refined)
-        let after = rewrite(channels: 2, settings: s)(concat([burst, tail], channels: 2))
-        let clean = rewrite(channels: 2, settings: s)(concat([silence(2, channels: 2), tail], channels: 2))
-        check("limiter: quiet after a limited burst is unaffected", compare(clean, after, seconds(4.5, 6)), limit: -100)
+        let sa = rewrite(channels: 2, settings: s)(concat([burst, tail], channels: 2))
+        let sc = rewrite(channels: 2, settings: s)(concat([silence(2, channels: 2), tail], channels: 2))
+        print(String(format: "    (stereo: %.1f dB re signal, the upmixer still adapting from the burst)", compare(sc, sa, seconds(4.5, 6)).rel))
     }
 }
 
@@ -213,15 +227,24 @@ func transitionSuite() {
     }
 
     // Far with loud noise → Dry with a quiet tone → Far: nothing of the noise comes back.
+    // On a 5.1 bed, so only the room can remember the noise (the stereo upmixer's steering
+    // keeps adapting for a while after loud material; that's reported separately).
     let noise = quiet(stereo(2, seed: 21), 0.5)
     let quietTone = (0..<Int(3 * rate)).map { Float(0.05 * sin(2 * .pi * 300 * Double($0) / rate)) }
     let withNoise = concat([noise, [quietTone, quietTone]], channels: 2)
     let withSilence = concat([silence(2, channels: 2), [quietTone, quietTone]], channels: 2)
+    let active = [0, 1, 2, 4, 5]
+    let tones = (0..<16).map { active.contains($0) ? quietTone : [Float](repeating: 0, count: quietTone.count) }
+    let bedNoise = concat([quiet(bed(2, active: active, seed: 21), 0.5), tones], channels: 16)
+    let bedSilence = concat([silence(2, channels: 16), tones], channels: 16)
     for r in Renderer.allCases {
         let changes: [Change] = [(Int(2 * rate), settings(.off, r)), (Int(4 * rate), settings(.far, r))]
-        let a = rewrite(channels: 2, settings: settings(.far, r), changes: changes)(withNoise)
-        let b = rewrite(channels: 2, settings: settings(.far, r), changes: changes)(withSilence)
-        check("\(r.label): Far → Dry → Far, no stale room", compare(b, a, seconds(4, 4.6)), limit: -100)
+        let a = rewrite(channels: 16, settings: settings(.far, r), changes: changes)(bedNoise)
+        let b = rewrite(channels: 16, settings: settings(.far, r), changes: changes)(bedSilence)
+        check("\(r.label): Far → Dry → Far, no stale room (5.1)", compare(b, a, seconds(4, 4.6)), limit: -100)
+        let sa = rewrite(channels: 2, settings: settings(.far, r), changes: changes)(withNoise)
+        let sb = rewrite(channels: 2, settings: settings(.far, r), changes: changes)(withSilence)
+        print(String(format: "    (stereo: %.1f dB re signal, the upmixer still adapting from the noise)", compare(sb, sa, seconds(4, 4.6)).rel))
     }
     let changes: [Change] = [(Int(2 * rate), settings(.off, .classic)), (Int(4 * rate), settings(.far, .classic))]
     let a = classic(channels: 2, settings: settings(.far, .classic), changes: changes)(withNoise)

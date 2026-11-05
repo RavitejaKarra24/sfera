@@ -29,7 +29,7 @@ enum Probe {
     static func snapshot(path: String, page: String) {
         let model = Controller(persisting: false)
         model.preview(page)
-        model.panelPage = page == "settings" ? .settings : .main
+        model.panelPage = page.hasPrefix("settings") ? .settings : .main
         if CommandLine.arguments.contains("--window") { windowSnapshot(model: model, path: path); return }
         Panel.snapshotting = true
         let view = Panel(model: model)

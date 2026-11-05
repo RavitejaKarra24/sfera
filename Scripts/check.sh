@@ -37,7 +37,7 @@ probe "tap probe" "run '$BIN --tap-probe' from Terminal; restricted shells get n
 
 echo "▸ snapshots"
 mkdir -p docs/screenshots
-for page in atmos stereo stereo-tap original off settings; do
+for page in atmos stereo stereo-tap original off settings settings-refined; do
   "$BIN" --snapshot "docs/screenshots/$page.png" --page "$page" >/dev/null
 done
 

@@ -109,6 +109,7 @@ func finish() -> Never {
 if args.contains("--classic") { finish() }
 
 refinedSuite()
+roomSuite()
 transitionSuite()
 if args.contains("--refined") { finish() }
 

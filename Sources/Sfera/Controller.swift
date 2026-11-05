@@ -585,6 +585,7 @@ final class Controller {
         if page == "off" { route = .none }
         if page == "stereo-tap" { loopbackName = nil }
         if page == "original" { settings.spatial = false }
+        if page == "settings-refined" { settings.renderer = .refined; settings.renderMode = .far }
         level = page == "off" ? 0 : 0.42
     }
 }

@@ -49,6 +49,16 @@ struct Biquad {
 
     mutating func reset() { x1 = 0; x2 = 0; y1 = 0; y2 = 0 }
 
+    /// Magnitude response at `frequency` (for the bench).
+    func magnitude(at frequency: Double, sampleRate: Double) -> Double {
+        let w = 2 * Double.pi * frequency / sampleRate
+        func mag(_ c0: Double, _ c1: Double, _ c2: Double) -> Double {
+            let re = c0 + c1 * cos(w) + c2 * cos(2 * w), im = -(c1 * sin(w) + c2 * sin(2 * w))
+            return (re * re + im * im).squareRoot()
+        }
+        return mag(Double(b0), Double(b1), Double(b2)) / mag(1, Double(a1), Double(a2))
+    }
+
     // RBJ cookbook designs.
 
     static func lowPass(_ frequency: Double, sampleRate: Double, q: Double = 0.707) -> Biquad {
@@ -91,4 +101,45 @@ struct SplitMix64 {
     }
 
     mutating func nextUniform() -> Double { Double(next() >> 11) / Double(UInt64(1) << 53) }
+}
+
+/// First-order shelf (bilinear): `low` sets the gain below `frequency`, otherwise above it.
+struct Shelf {
+    var b0: Float = 1, b1: Float = 0, a1: Float = 0
+    var x1: Float = 0, y1: Float = 0
+
+    init() {}
+
+    init(low: Bool, frequency: Double, gain: Double, sampleRate: Double) {
+        let k = tan(.pi * min(frequency, sampleRate * 0.49) / sampleRate)
+        let a0 = 1 + k
+        if low {          // (s + G·ωc) / (s + ωc)
+            b0 = Float((1 + gain * k) / a0); b1 = Float((gain * k - 1) / a0)
+        } else {          // (G·s + ωc) / (s + ωc)
+            b0 = Float((gain + k) / a0); b1 = Float((k - gain) / a0)
+        }
+        a1 = Float((k - 1) / a0)
+    }
+
+    /// Magnitude response at `frequency`.
+    func magnitude(at frequency: Double, sampleRate: Double) -> Double {
+        let w = 2 * Double.pi * frequency / sampleRate
+        func mag(_ c0: Double, _ c1: Double) -> Double {
+            let re = c0 + c1 * cos(w), im = -c1 * sin(w)
+            return (re * re + im * im).squareRoot()
+        }
+        return mag(Double(b0), Double(b1)) / mag(1, Double(a1))
+    }
+
+    /// New coefficients, same state.
+    mutating func take(_ other: Shelf) { b0 = other.b0; b1 = other.b1; a1 = other.a1 }
+
+    @inline(__always)
+    mutating func process(_ x: Float) -> Float {
+        let y = b0 * x + b1 * x1 - a1 * y1
+        x1 = x; y1 = y
+        return y
+    }
+
+    mutating func reset() { x1 = 0; y1 = 0 }
 }

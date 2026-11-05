@@ -81,22 +81,42 @@ Output then passes the look-ahead limiter (−1.5 dB threshold, −0.3 dB ceilin
 
 ## Renderers: Classic and Refined
 
-Settings › Renderer picks one; Classic is the default, and saved settings without a renderer load as Classic. **Classic** is Sfera 1.0 exactly: the bench renders it next to the engine frozen at `d18a518` and requires a bit-identical match (VALIDATION §2). **Refined** keeps the same room, gains and voicing and corrects what the 1.0 model gets wrong:
+Settings › Renderer picks one; Classic is the default, and saved settings without a renderer load as Classic. **Classic** is Sfera 1.0 exactly: the bench renders it next to the engine frozen at `d18a518` and requires a bit-identical match (VALIDATION §2). **Refined** keeps the same mode gains (direct, send, makeup) and corrects what the 1.0 model gets wrong, with its own room (next section):
 
 | | Classic | Refined |
 |---|---|---|
 | ITD angle | the azimuth itself, so a rear speaker at 135° gets *more* ITD than a side one (0.78 ms vs 0.67) | the lateral angle `θ = asin(|sin az · cos el|)`, so ITD rises to 90° and falls to 0 at 180° (Woodworth): Lrs 0.39 ms |
 | Height speakers | ITD and shadow of their ear-plane speaker | the same model with `cos el`: Ltf 0.19 ms (vs L 0.27), Ltr 0.27 ms (vs Lrs 0.39) |
 | Head shadow | from `sin az` | from the lateral component, and the rear term scaled by `cos el` |
-| Room: back wall / ceiling reflections | the back wall (180°) carried 19 samples of ITD | 0 at 0° and 180°; all eight reflections use the lateral-angle ITD |
+| Room: back wall / ceiling reflections | the back wall (180°) carried 19 samples of ITD; the "ceiling" reflection arrived from the front, at ear height | per-speaker image sources (below): reflections from straight ahead or behind have no ITD, ceiling and floor reflections arrive from above and below with the elevation cue |
+| Elevation cue | −5 dB·(el/60) at 8.2 kHz on height speakers (the opposite of Blauert's "above" band) | the pinna's first notch moves up with elevation (≈ 8 kHz → 10.8 kHz at 60°; Iida et al. 2007): relative to the ear plane, +5·e dB at 7 kHz and −8·e dB at 8·(1+0.35e) kHz, e = el/60; below the ear plane the notch moves down |
+| Height speaker level | `distanceGain` with elevation ×1.5, so heights came out up to 2.5 dB louder than the ear plane | every speaker equidistant (1/1.7), as the mix assumes |
 | Upmix level | a hard-left or half-left source came out +2.2…+2.5 dB louder than the input: parts of it that reach the same speaker coherently added in amplitude where the pan law assumed power | coherent steering: the steering and pan gains account for the inter-channel coherence (`k = 1/(√(b²+1)+b)` on the recombined pair), so hard left, half left and centre all keep the input level (±0.00 dB) |
 | New rear event in a bed | the 50 ms one-pole crossfade let the first 30 ms of a rear-only event through at −2.8 dB | linear crossfade finished before the first delayed bed sample appears: full level |
 | LFE vs mains | the LFE skipped the room's direct-path level, so bass moved against the mains by 4.4 dB across rooms (+6.7/+5.1/+6.6/+9.5 dB re centre) | Far's balance (+9.5 dB) in every room; in Dry it follows the −3 dB centre pan |
 | Limiter release | stalls at −0.002 dB after a limited burst (Float) | release tracked in Double: recovers fully |
 
-Refined costs about 0.06 % more of one core on stereo (0.78 % vs 0.72 %). Its fractional delay lines are `max(129, ⌈maxITD·fs⌉ + 3)` long, so they cover the largest ITD at any sample rate.
+Refined costs about a third of a percent more of one core: 1.06 % vs 0.72 % on stereo, 0.66 % vs 0.32 % on 9.1.6 Atmos. Its fractional delay lines are `max(129, ⌈maxITD·fs⌉ + 3)` long, so they cover the largest ITD at any sample rate.
 
-**Changing room mode or renderer.** The direct path, LFE and the room's input dip to silence over 10 ms, the change is applied there, and they fade back in over 10 ms. The room's tail keeps ringing through the change (it decays naturally into Dry rather than being cut), and the room-mode makeup glides to the new value over the fade-in so the tail doesn't jump. A renderer change also dips the room's output, because its reflection taps change. Entering or leaving Dry restarts the head filters from silence. This applies to both renderers; 1.0's switches clicked, up to 11× the signal's own slope and up to −13.7 dB of the old room returning after Dry → Far.
+### Refined room
+
+`RefinedRoom.swift`. Near/Mid/Far set the direct and send levels exactly as before; Settings › Room shapes the room itself: **Size** (Small/Medium/Large), **Decay** (0.25–1.2 s at 1 kHz, default 0.45), **Early reflections** and **Reverb tail** (−12…+6 dB re the default), **Bass in room** (0–100 %, default 50 %).
+
+**Early reflections, per speaker.** A shoebox around the listener (Medium: 5.2 m wide, front wall 2.9 m ahead, back wall 3.6 m behind, ceiling 1.8 m above the ears, floor 1.2 m below; Small and Large scale it, and the virtual speakers sit at 1.6 / 2.0 / 2.6 m). Each speaker direction gets six first-order image sources (side walls, front, back, ceiling, floor), each with:
+
+- delay = extra path length / c, gain = reflectance × direct distance / path length (reflectance 0.8 walls and back, 0.72 front, 0.75 ceiling, 0.55 floor);
+- the refined head model at the reflection's own arrival direction: ITD on the far ear, ILD, and shadow;
+- for ceiling and floor reflections (arriving more than 20° above or below), the elevation cue instead of the shadow.
+
+So a centre voice, a hard-left guitar and a rear effect each excite the walls they would in a real room (Classic panned every source into the same two buses and the same eight reflections). To stay cheap, every reflection is summed into one of 7 buses per ear (no shadow, 4 shadow cutoffs 9/4.5/2.2/1.1 kHz, above, below) and each bus is filtered once; then the early sum is high-passed at 200 Hz (bass attacks aren't smeared) and low-passed at 9 kHz. Each speaker's send has its own history line; a speaker that's been silent longer than the line costs nothing.
+
+**Tail.** The lateral send bus (plus the LFE, at the centre's pan) goes through a high-pass that moves from 160 Hz (bass 0) to 40 Hz (bass 1), a 8 kHz low-pass, four series all-passes per side (4.3–13.9 ms × size, g 0.6: a dense onset instead of discrete echoes) and a 4 ms × size predelay into the 8-line Hadamard FDN (Classic's line lengths × 0.75 / 1 / 1.45). Each line's loss is a gain and two first-order shelves (220 Hz, 3 kHz) solved together so the decay is 1.3× the setting at 100 Hz, the setting at 1 kHz and 0.4× at 8 kHz. A decay change glides the loop filters over 100 ms.
+
+**Calibration.** With default settings, Refined's room has the same energy as Classic's in the first 50 ms (+0.01 dB) and after it (+0.30 dB), summed over ten bed speakers at Far, so the existing makeup gains still hold.
+
+**Room changes while playing.** Decay, levels and bass glide. A size change uses the same dip as a mode change and starts the new room empty.
+
+**Changing room mode or renderer.** The direct path, LFE and the room's input dip to silence over 10 ms, the change is applied there, and they fade back in over 10 ms. The room's tail keeps ringing through the change (it decays naturally into Dry rather than being cut), and the room-mode makeup glides to the new value over the fade-in so the tail doesn't jump. A renderer or room-size change also dips the room's output, because its reflection taps change, and the incoming room starts empty. Entering or leaving Dry restarts the head filters from silence. This applies to both renderers; 1.0's switches clicked, up to 11× the signal's own slope and up to −13.7 dB of the old room returning after Dry → Far.
 
 ## Real-time chain
 

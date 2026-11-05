@@ -66,6 +66,12 @@ public final class Spatializer: @unchecked Sendable {
     /// One head renderer per `Renderer` (indexed by `headIndex`); only the active one runs.
     private let heads: [HeadRenderer]
     private let room: Room
+    /// The Refined renderer's room: early reflections per speaker direction.
+    private let refinedRoom: RefinedRoom
+    private let groupSends: UnsafeMutablePointer<UnsafeMutablePointer<Float>>
+    private let groupActive: UnsafeMutablePointer<Bool>
+    private let groupCount: Int
+    private var appliedSize: RoomSize
     private var roomSilent = 0
     private var lfe: Biquad
     private var lfeSilent = Int.max
@@ -141,6 +147,16 @@ public final class Spatializer: @unchecked Sendable {
             HeadRenderer(speakers: sortedSpeakers, sampleRate: sampleRate, maxFrames: maxFrames, renderer: $0)
         }
         room = Room(sampleRate: sampleRate)
+        let directions = heads[Self.headIndex(.refined)].groupDirections
+        groupCount = directions.count
+        refinedRoom = RefinedRoom(sampleRate: sampleRate, maxFrames: maxFrames, groups: directions)
+        groupSends = .allocate(capacity: max(groupCount, 1))
+        for g in 0..<groupCount { groupSends[g] = makeBuffer(maxFrames) }
+        groupActive = .allocate(capacity: max(groupCount, 1))
+        groupActive.initialize(repeating: false, count: max(groupCount, 1))
+        appliedSize = settings.room.size
+        refinedRoom.configure(size: appliedSize)
+        refinedRoom.tune(settings.room)
         lfe = .lowPass(80, sampleRate: sampleRate)
         limiter = Limiter(sampleRate: sampleRate)
         latency = delay + limiter.latency
@@ -193,6 +209,8 @@ public final class Spatializer: @unchecked Sendable {
         for p in inputs + ring + delayed + mix { p.deallocate() }
         for j in 0..<Upmixer.outputCount { upOut[j].deallocate() }
         upOut.deallocate()
+        for g in 0..<groupCount { groupSends[g].deallocate() }
+        groupSends.deallocate(); groupActive.deallocate()
         feeds.deallocate()
         for p in [ramp, dipRamp, spatL, spatR, sendL, sendR, origL, origR, lfeBuf] { p.deallocate() }
         lastActive.deallocate()
@@ -262,10 +280,10 @@ public final class Spatializer: @unchecked Sendable {
         ringWrite = w
 
         // Room mode / renderer change: once the dip has reached silence, switch.
-        let wanted = (settings.renderMode, settings.renderer)
-        if wanted != (appliedMode, appliedRenderer) {
-            if wanted.1 != appliedRenderer { dipRoom = true }
-            if dip == 0 { applyRender(mode: wanted.0, renderer: wanted.1) } else { dipping = true }
+        if changePending {
+            // A new renderer or room size changes the room's taps: dip its output too.
+            if settings.renderer != appliedRenderer || settings.room.size != appliedSize { dipRoom = true }
+            if dip == 0 { applyRender() } else { dipping = true }
         }
         let renderer = appliedRenderer
         let refined = renderer == .refined
@@ -368,7 +386,9 @@ public final class Spatializer: @unchecked Sendable {
         vDSP_vclr(spatL, 1, n); vDSP_vclr(spatR, 1, n)
         vDSP_vclr(sendL, 1, n); vDSP_vclr(sendR, 1, n)
         heads[Self.headIndex(renderer)].process(feeds: feeds, frames: frames, direct: direct, send: send, dry: dry,
-                                               outL: spatL, outR: spatR, sendL: sendL, sendR: sendR)
+                                               outL: spatL, outR: spatR, sendL: sendL, sendR: sendR,
+                                               groupSends: refined ? UnsafePointer(groupSends) : nil,
+                                               groupActive: refined ? groupActive : nil)
 
         if let x = lfeFeed {
             // Classic: the LFE skips the direct-path level, so it moves against the mains as the
@@ -386,6 +406,13 @@ public final class Spatializer: @unchecked Sendable {
             lfe.run(lfeBuf, frames)
             vDSP_vadd(spatL, 1, lfeBuf, 1, spatL, 1, n)
             vDSP_vadd(spatR, 1, lfeBuf, 1, spatR, 1, n)
+            if refined, send > 0 {
+                // Refined: the LFE excites the room like a front speaker would, so the bass
+                // balance holds with "bass in room" (the tail's input decides how much gets in).
+                var k = send * 0.70710678
+                vDSP_vsma(lfeBuf, 1, &k, sendL, 1, sendL, 1, n)
+                vDSP_vsma(lfeBuf, 1, &k, sendR, 1, sendR, 1, n)
+            }
         }
 
         // Dip: the direct path, LFE and the room's input fade towards a pending change (and
@@ -395,6 +422,9 @@ public final class Spatializer: @unchecked Sendable {
             fillDip(frames: frames)
             if !dipAfterRoom { vDSP_vmul(spatL, 1, dipRamp, 1, spatL, 1, n); vDSP_vmul(spatR, 1, dipRamp, 1, spatR, 1, n) }
             vDSP_vmul(sendL, 1, dipRamp, 1, sendL, 1, n); vDSP_vmul(sendR, 1, dipRamp, 1, sendR, 1, n)
+            if refined {
+                for g in 0..<groupCount where groupActive[g] { vDSP_vmul(groupSends[g], 1, dipRamp, 1, groupSends[g], 1, n) }
+            }
         }
 
         // The room runs until its tail has died away, in Dry too (Dry sends nothing).
@@ -405,9 +435,17 @@ public final class Spatializer: @unchecked Sendable {
             sendPeak = max(sendPeak, p)
             roomSilent = sendPeak == 0 ? roomSilent + frames : 0
             if roomSilent < dormantAfter {
-                room.process(sendL: sendL, sendR: sendR, addingTo: spatL, spatR, frames: frames, renderer: renderer)
+                if refined {
+                    if dry { for g in 0..<groupCount { groupActive[g] = false } }
+                    refinedRoom.tune(settings.room)
+                    refinedRoom.process(groupSends: groupSends, groupActive: groupActive, sendL: sendL, sendR: sendR,
+                                        addingTo: spatL, spatR, frames: frames)
+                } else {
+                    room.process(sendL: sendL, sendR: sendR, addingTo: spatL, spatR, frames: frames, renderer: renderer)
+                }
             } else if roomSilent - frames < dormantAfter {
                 room.reset()
+                refinedRoom.reset()
             }
         }
         if dipNow, dipAfterRoom {
@@ -481,7 +519,7 @@ public final class Spatializer: @unchecked Sendable {
     /// The dip gain for this block: down to 0 while a change is pending, then up to 1 once it
     /// has been applied. When nothing is changing it isn't computed or applied at all.
     private func fillDip(frames: Int) {
-        let pending = (settings.renderMode, settings.renderer) != (appliedMode, appliedRenderer)
+        let pending = changePending
         let step = pending ? -dipStep : dipStep
         var g = dip
         for i in 0..<frames {
@@ -492,13 +530,28 @@ public final class Spatializer: @unchecked Sendable {
         if !pending, g == 1 { dipping = false; dipRoom = false }
     }
 
-    /// Switches mode/renderer while the spatial path is silent.
-    private func applyRender(mode: RoomMode, renderer: Renderer) {
+    /// A room mode, renderer or (Refined) room size the output hasn't switched to yet.
+    private var changePending: Bool {
+        settings.renderMode != appliedMode || settings.renderer != appliedRenderer
+            || (settings.renderer == .refined && settings.room.size != appliedSize)
+    }
+
+    /// Switches mode/renderer/size while the spatial path is silent.
+    private func applyRender() {
+        let mode = settings.renderMode, renderer = settings.renderer
         let dryChange = (mode == .off) != (appliedMode == .off)
         if renderer != appliedRenderer || dryChange {
             // A renderer that wasn't running, or Dry (which skips the head filters), holds
             // stale filter state: start it from silence.
             heads[Self.headIndex(renderer)].reset()
+        }
+        if renderer != appliedRenderer {
+            // The incoming renderer's room hasn't been running: start it empty.
+            if renderer == .refined { refinedRoom.reset() } else { room.reset() }
+        }
+        if renderer == .refined, settings.room.size != appliedSize {
+            appliedSize = settings.room.size
+            refinedRoom.configure(size: appliedSize)       // starts empty
         }
         appliedMode = mode
         appliedRenderer = renderer
@@ -531,6 +584,8 @@ public final class Spatializer: @unchecked Sendable {
         upmixRunning = true
         for h in heads { h.reset() }
         room.reset()
+        if settings.room.size != appliedSize { appliedSize = settings.room.size; refinedRoom.configure(size: appliedSize) }
+        refinedRoom.reset()
         roomSilent = 0
         lfe.reset()
         lfeSilent = Int.max

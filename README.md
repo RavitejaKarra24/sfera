@@ -26,7 +26,7 @@ Sfera has no window and no Dock icon. It lives in the menu bar (headphones icon:
 - **The sound field** shows what you're hearing. Teal dots are the channels that are really arriving (5.1, 7.1, Atmos). Violet dots are the virtual speakers the stereo upmix creates.
 - **Spatial / Original** compares at matched loudness, so the comparison is fair.
 - **Room:** Dry / Near / Mid / Far is how much virtual room you hear. Mid sounds most like speakers.
-- **Settings** (bottom left) has the renderer (Classic is the 1.0 sound, unchanged; Refined fixes rear/height placement, upmix level and bass balance, see [docs/ENGINE.md](docs/ENGINE.md#renderers-classic-and-refined)), the upmix tuning (centre, width, surround, height, bass to LFE), a volume trim, the BlackHole switch, "Listen when Sfera opens" and "Open at login".
+- **Settings** (bottom left) has the renderer (Classic is the 1.0 sound, unchanged; Refined fixes rear/height placement, upmix level and bass balance and has a room that answers each speaker, see [docs/ENGINE.md](docs/ENGINE.md#renderers-classic-and-refined)), the Refined room (size, decay, early reflections, reverb tail, bass in room), the upmix tuning (centre, width, surround, height, bass to LFE), a volume trim, the BlackHole switch, "Listen when Sfera opens" and "Open at login".
 
 How much Sfera can hear depends on whether [BlackHole 16ch](https://existential.audio/blackhole/) is installed:
 
@@ -77,7 +77,8 @@ All rendering is in [`Sources/SferaCore`](Sources/SferaCore); formulas are in [d
 
 - `Upmixer.swift`: stereo → 7.0.4 by per-bin principal-component direct/ambience separation (vectorised: SIMD covariance/eigen pass, batched `atan2`/`sincos`, vDSP synthesis).
 - `Binaural.swift`: synthetic-HRTF head renderer (Woodworth ITD, head shadow, elevation notch). Speakers at the same azimuth share one shadow/ITD path.
-- `Room.swift`: early reflections + 8-line FDN late tail, and the look-ahead limiter.
+- `Room.swift`: Classic's room (early reflections + 8-line FDN late tail), and the look-ahead limiter.
+- `RefinedRoom.swift`: the Refined room: per-speaker image-source reflections with ceiling/floor elevation cues, a diffused FDN tail with frequency-dependent decay, bass in the room.
 - `Spatializer.swift`: the real-time chain. It detects what's arriving (stereo, 3.1, 5.1, 7.1, Atmos), crossfades between upmix and bed, keeps a loudness-matched Original path, and goes dormant in silence.
 
 App side (`Sources/Sfera`): `Session` (one aggregate device: your output as the clock plus BlackHole with drift compensation, or a process tap), `Controller` (routing, permissions, device listeners, prefs), `Devices` (Core Audio helpers), `UI/` (the panel).
