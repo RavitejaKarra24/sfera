@@ -264,7 +264,7 @@ private struct SettingsPage: View {
                         Segmented(options: Renderer.allCases.map { ($0, $0.label) }, selection: binding(\.renderer), height: 26)
                         Text(model.settings.renderer == .classic
                              ? "Sfera 1.0's sound, unchanged."
-                             : "Truer rear and height placement, a room that answers each speaker, bass steady across rooms.")
+                             : "1.0's image with a smoother, adjustable room and steady bass.")
                             .font(.system(size: 10.5))
                             .foregroundStyle(Theme.tertiary)
                             .fixedSize(horizontal: false, vertical: true)

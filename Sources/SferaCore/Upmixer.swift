@@ -12,11 +12,8 @@ import Foundation
 /// N = 2048, hop 512, periodic Hann on analysis and synthesis. Output lags input by
 /// `latency` samples. Allocation-free after init.
 ///
-/// Level-preserving steering (`coherentSteering`, the refined renderer): the steered part of
-/// a source and the part left on L or R are the same signal, so where both land in the same
-/// speaker they add in phase (+2.7 dB on L for a hard-left source at Centre 0.75). The steered
-/// share into L/R is then scaled so the coherent sum carries the intended energy. Classic
-/// adds them as if they were uncorrelated.
+/// Both renderers use this steering. (A level-preserving variant for Refined was tried and
+/// removed: it moved more of a stereo mix into C, which collapses the image on headphones.)
 final class Upmixer {
     static let fftSize = 2048
     static let hop = 512
@@ -64,9 +61,6 @@ final class Upmixer {
     private struct Bins {
         let vL, vR, steer, sRe, sIm, mL, mR, gAL, gAR, theta, x, sin, cos: UnsafeMutablePointer<Float>
         let aLr, aLi, aRr, aRi, topF, topR: UnsafeMutablePointer<Float>
-        /// Coherent steering: m·v·cos δ / √steer for L and R (the kept part's in-phase
-        /// amplitude relative to the steered source).
-        let cohL, cohR: UnsafeMutablePointer<Float>
         let segment: UnsafeMutablePointer<Int32>
         let active: UnsafeMutablePointer<Bool>
     }
@@ -79,8 +73,6 @@ final class Upmixer {
         var lfe = false
     }
     private var gains = Gains()
-    /// Refined renderer: level-preserving steering. Read once per frame.
-    var coherentSteering = false
 
     init(sampleRate: Double, settings: UpmixSettings = UpmixSettings()) {
         let n = Upmixer.fftSize, half = n / 2, hop = Upmixer.hop
@@ -110,7 +102,7 @@ final class Upmixer {
                    mL: buffer(half), mR: buffer(half), gAL: buffer(half), gAR: buffer(half), theta: buffer(half),
                    x: buffer(half), sin: buffer(half), cos: buffer(half),
                    aLr: buffer(half), aLi: buffer(half), aRr: buffer(half), aRi: buffer(half),
-                   topF: buffer(half), topR: buffer(half), cohL: buffer(half), cohR: buffer(half),
+                   topF: buffer(half), topR: buffer(half),
                    segment: .allocate(capacity: half), active: .allocate(capacity: half))
         bin.segment.initialize(repeating: 0, count: half)
         bin.active.initialize(repeating: false, count: half)
@@ -286,8 +278,6 @@ final class Upmixer {
     private func analyse() -> (left: Bool, right: Bool) {
         let half = self.half, count = half - 1
         let g = gains
-        let coherent = coherentSteering
-        let cohL = bin.cohL, cohR = bin.cohR
         let alpha = self.alpha, oneMinusAlpha = 1 - alpha
         let reL = self.reL, imL = self.imL, reR = self.reR, imR = self.imR
         let pLL = self.pLL, pRR = self.pRR, cRe = self.cRe, cIm = self.cIm
@@ -369,18 +359,6 @@ final class Upmixer {
             store(mLk, mL, k)
             store(mRk, mR, k)
 
-            if coherent {
-                // Model: X_L = l·s, X_R = r·s·e^{iψ}. The steered source has the phase of
-                // l²+r²e^{iψ}, i.e. δ_L from X_L and δ_R from X_R. The part left in L has
-                // in-phase amplitude m_L·l·cos δ_L per unit of the steered source's √steer.
-                let l2 = vL2, r2 = one - vL2
-                let cosPsi = (cr / cMag).replacing(with: 1, where: .!(cMag .> tiny))
-                let den = pointwiseMax(l2 * l2 + r2 * r2 + 2 * l2 * r2 * cosPsi, zero).squareRoot()
-                let ok = (den .> tiny) .& (steerRoot .> tiny)
-                let cosL = (l2 + r2 * cosPsi) / den, cosR = (r2 + l2 * cosPsi) / den
-                store((mLk * l * cosL / steerRoot).replacing(with: 0, where: .!ok), cohL, k)
-                store((mRk * r * cosR / steerRoot).replacing(with: 0, where: .!ok), cohR, k)
-            }
             store(l.replacing(with: 1, where: .!live), vL, k)
             store(r.replacing(with: 0, where: .!live), vR, k)
             let st = steer.replacing(with: 0, where: .!live)
@@ -416,24 +394,6 @@ final class Upmixer {
 
             // 4. Steered direct sound into the five frontal slots (zero where not steered).
             let sl = Slot.lssDirect * half, ll = Slot.l * half, cc = Slot.c * half, rr = Slot.r * half, sr = Slot.rssDirect * half
-            if coherent {
-                // Scale the steered share g into L/R by k so that |kept + k·g·S|² equals
-                // kept² + g²·S² for in-phase parts: k = √(b² + 1) − b with b = cohX / g,
-                // written as 1/(√(b² + 1) + b). Anti-phase (b ≤ 0) is never boosted.
-                @inline(__always) func scaled(_ g: Float, _ c: Float) -> Float {
-                    guard g > 0, c > 0 else { return g }
-                    let b = c / g
-                    return g / ((b * b + 1).squareRoot() + b)
-                }
-                for k in 1..<half where steerB[k] > 0 {
-                    switch segment[k] {
-                    case 0: sinB[k] = scaled(sinB[k], cohL[k])
-                    case 1: cosB[k] = scaled(cosB[k], cohL[k])
-                    case 2: sinB[k] = scaled(sinB[k], cohR[k])
-                    default: cosB[k] = scaled(cosB[k], cohR[k])
-                    }
-                }
-            }
             for k in 1..<half where steerB[k] > 0 {
                 let lo = cosB[k], hi = sinB[k]
                 let re = sRe[k], im = sIm[k]

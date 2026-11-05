@@ -1,75 +1,69 @@
 import Accelerate
 import Foundation
 
-/// The Refined renderer's virtual room.
+/// The Refined renderer's virtual room: Classic's early reflections, scaled by room size, and
+/// a new late tail.
 ///
-/// **Early reflections belong to the source.** Every speaker direction gets its own six
-/// first-order image sources in a shoebox room (side walls, front, back, ceiling, floor), so a
-/// centre voice, a hard-left guitar and a rear effect each excite the walls they would excite
-/// in a real room. Each reflection arrives from its own direction with the head model's ITD,
-/// ILD and shadow; ceiling and floor reflections carry the elevation cue. Gains follow path
-/// length (1/r) and wall reflectance. To stay cheap, reflections are summed into a few buses
-/// per ear (by shadow cutoff, plus "above" and "below") and each bus is filtered once.
-/// Reflections stay above 200 Hz, so bass attacks aren't smeared.
+/// **Early reflections** are Classic's eight, off the side walls, ceiling and back wall at fixed
+/// directions (8.7–29.8 ms in Medium), fed by the two lateral send buses, each with its own ITD
+/// and far-ear shadow. Every speaker excites the same pattern, so a vocal spread over L, C and
+/// R gets as much room as a vocal on C alone: its reflections add coherently, as its direct
+/// sound does. Size scales the delays (Small ×0.92, Large ×1.3). Per-speaker image-source
+/// reflections were tried and measured worse on headphones: their floor, front and back
+/// reflections reached both ears alike, and a phantom-centre vocal's reflections added only
+/// in power, so it came out up to 3 dB drier than in Classic (bench: openness suite).
 ///
-/// **Late tail.** The lateral send bus feeds four series all-passes per side (a dense onset
-/// instead of a few discrete echoes), then an 8-line Hadamard FDN whose lines decay by
+/// **Late tail.** The send bus (plus the LFE) feeds four short all-passes per side (a dense
+/// onset instead of a few discrete echoes), then an 8-line Hadamard FDN whose lines decay by
 /// frequency: 100 Hz 1.3× the set decay, 8 kHz 0.4× (a gain and two first-order shelves per
-/// line, solved together; Jot & Chaigne 1991). The tail's high-pass moves from 160 Hz down
-/// to 40 Hz with "bass in room", and the LFE feeds it too.
+/// line, solved together; Jot & Chaigne 1991). Each ear's output then runs through its own
+/// four all-passes, so the ears hear different tails even for a one-sided source. The tail
+/// decays from its start, like Classic's, instead of swelling. Its high-pass moves from 160 Hz
+/// down to 40 Hz with "bass in room"; the reflections keep Classic's 160 Hz.
 ///
-/// Size scales the room, the virtual speakers' distance, the tail lines and the diffusers.
-/// Default levels are calibrated to Classic's room at the same mode: the same energy in the
-/// first 50 ms and after it (bench: VALIDATION §3).
+/// Default levels match Classic's room at the same mode, per size: the same energy in the
+/// first 80 ms and after it (bench: VALIDATION §3).
 final class RefinedRoom {
-    // Room geometry in metres around the listener's head: x right, y front, z up.
-    private struct Geometry {
-        let halfWidth, front, back, ceiling, floor, speakerRadius, scale: Double
-    }
-    private static func geometry(_ size: RoomSize) -> Geometry {
-        switch size {
-        case .small: Geometry(halfWidth: 1.9, front: 2.3, back: 2.4, ceiling: 1.5, floor: 1.1, speakerRadius: 1.6, scale: 0.75)
-        case .medium: Geometry(halfWidth: 2.6, front: 2.9, back: 3.6, ceiling: 1.8, floor: 1.2, speakerRadius: 2.0, scale: 1.0)
-        case .large: Geometry(halfWidth: 3.8, front: 3.9, back: 5.2, ceiling: 2.6, floor: 1.2, speakerRadius: 2.6, scale: 1.45)
-        }
-    }
-    /// Reflectance of the side walls, front, back, ceiling, floor (rug).
-    private static let reflectance: [Double] = [0.8, 0.8, 0.72, 0.8, 0.75, 0.55]
-    /// Calibration: Classic's room energy in 0–50 ms and after 50 ms, with default settings.
-    static let earlyNorm: Float = 1.112
-    static let lateNorm: Float = 0.32 * 0.35
+    /// Classic's reflections (Room.swift): azimuth, delay in Medium, gain, the bus that feeds it
+    /// (−1 left, 1 right, 0 both).
+    private static let reflections: [(azimuth: Double, delayMS: Double, gain: Float, side: Int)] = [
+        (-55, 8.7, 0.62, -1), (60, 10.3, 0.60, 1), (0, 12.9, 0.48, 0), (-115, 16.4, 0.45, -1),
+        (120, 18.1, 0.44, 1), (-85, 22.6, 0.36, -1), (90, 25.2, 0.35, 1), (180, 29.8, 0.30, 0),
+    ]
+    private static let count = 8
+    /// Per size (Small, Medium, Large): reflection delays, and the tail's lines, diffusers and
+    /// predelay.
+    private static let earlyScale: [Double] = [0.92, 1, 1.3]
+    private static let tailScale: [Double] = [0.75, 1, 1.45]
+    /// Calibration per size: with default settings, the same energy as Classic's room in the
+    /// first 80 ms and after it. Size changes the timing, not the amount.
+    private static let earlyNorm: [Float] = [1.004, 1.040, 1.049]
+    private static let lateNorm: [Float] = [0.0985, 0.0617, 0.0457]
 
     private static let fdnDelays48k = [1031, 1327, 1523, 1801, 2053, 2311, 2579, 2861]
-    private static let diffuserMS: [[Double]] = [[4.3, 6.1, 8.9, 12.7], [4.7, 6.7, 9.7, 13.9]]
-    private static let diffuserGain: Float = 0.6
-    private static let shadowCutoffs: [Double] = [9000, 4500, 2200, 1100]   // classes 1…4
-    private static let classes = 7            // 0 none, 1…4 shadow, 5 above, 6 below
-    private static let above = 5, below = 6
+    /// All-pass chains: input L, input R (onset density), output L, output R (each ear's tail
+    /// its own, so a source on one side doesn't reach both ears as the same tail).
+    private static let diffuserMS: [[Double]] = [[1.9, 3.1, 4.3, 6.1], [2.1, 3.3, 4.7, 6.7],
+                                                 [1.3, 2.3, 3.7, 5.3], [1.7, 2.9, 4.1, 5.9]]
+    private static let chains = 4
+    private static let diffuserGain: Float = 0.5
 
     private let sampleRate: Double
-    private let maxFrames: Int
-    private let groupCount: Int
-
-    // MARK: Early reflections
-
-    /// One ear of one reflection.
-    private struct Tap { var group: Int; var delay: Int; var gain: Float; var bus: Int }
-    private let taps: [[Tap]]                  // per size
     private var sizeIndex = 1
-    private let historyMask: Int
-    private let history: [UnsafeMutablePointer<Float>]
-    private let groupSilent: UnsafeMutablePointer<Int>
-    private var writeIndex = 0
-    private let buses: [UnsafeMutablePointer<Float>]    // ear * classes + class
-    private let shadowCoef: [Float]
+
+    // MARK: Early reflections (struct-of-arrays, size * 8 + reflection)
+
+    private let nearDelay: UnsafeMutablePointer<Int>, farDelay: UnsafeMutablePointer<Int>
+    private let nearGain: UnsafeMutablePointer<Float>, farGain: UnsafeMutablePointer<Float>
+    private let side: UnsafeMutablePointer<Int>, rightIsNear: UnsafeMutablePointer<Bool>
+    private let shadowCoef: UnsafeMutablePointer<Float>, shadowState: UnsafeMutablePointer<Float>
+    private let busMask: Int
+    private let busL: UnsafeMutablePointer<Float>, busR: UnsafeMutablePointer<Float>
+    private var busWrite = 0
     // Audio-thread state lives in raw memory: no copy-on-write in the render loop.
-    private let shadowState: UnsafeMutablePointer<Float>                 // ear * 4 + class
-    private let upFilters: UnsafeMutablePointer<Biquad>                  // ear * 2 + [boost, notch]
-    private let downFilters: UnsafeMutablePointer<Biquad>
     private let earlyHP: UnsafeMutablePointer<Biquad>
     private let earlyLPCoef: Float
     private var earlyLPL: Float = 0, earlyLPR: Float = 0
-    private let earlyL: UnsafeMutablePointer<Float>, earlyR: UnsafeMutablePointer<Float>
 
     // MARK: Late tail
 
@@ -77,7 +71,7 @@ final class RefinedRoom {
     private var bassAmount = -1.0
     private let inputLPCoef: Float
     private var inputLPL: Float = 0, inputLPR: Float = 0
-    private let diffusers: UnsafeMutablePointer<UnsafeMutablePointer<Float>>     // side * 4 + stage
+    private let diffusers: UnsafeMutablePointer<UnsafeMutablePointer<Float>>     // chain * 4 + stage
     private let diffuserMax: [Int]
     private let diffuserLength: UnsafeMutablePointer<Int>
     private let diffuserIndex: UnsafeMutablePointer<Int>
@@ -86,6 +80,7 @@ final class RefinedRoom {
     private var predelay = 1
     private var predelayIndex = 0
     private let lines: UnsafeMutablePointer<UnsafeMutablePointer<Float>>
+    private let lineCapacity: [Int]
     private let lineLength: UnsafeMutablePointer<Int>
     private let heads: UnsafeMutablePointer<Int>
     private let midGain: UnsafeMutablePointer<Float>
@@ -108,89 +103,55 @@ final class RefinedRoom {
     private var earlyGain: Float = 1, lateGain: Float = 1
     private var earlyTarget: Float = 1, lateTarget: Float = 1
 
-    init(sampleRate: Double, maxFrames: Int, groups: [(azimuth: Double, elevation: Double)]) {
+    init(sampleRate: Double) {
         self.sampleRate = sampleRate
-        self.maxFrames = maxFrames
-        groupCount = groups.count
 
-        // Image sources for every size, so a size change only switches tables.
-        let c = Cue.speedOfSound
+        // Early reflections for every size, so a size change only switches tables.
+        let n = Self.count, all = n * Self.earlyScale.count
+        nearDelay = .allocate(capacity: all); farDelay = .allocate(capacity: all)
+        nearGain = .allocate(capacity: all); farGain = .allocate(capacity: all)
+        side = .allocate(capacity: all); rightIsNear = .allocate(capacity: all)
+        shadowCoef = .allocate(capacity: all); shadowState = makeBuffer(n)
+        let headDelay = Cue.headRadius / Cue.speedOfSound
         var longest = 0
-        taps = RoomSize.allCases.map { size in
-            let g = Self.geometry(size)
-            var list: [Tap] = []
-            for (gi, dir) in groups.enumerated() {
-                let az = dir.azimuth * .pi / 180, el = dir.elevation * .pi / 180
-                let r = g.speakerRadius
-                let m = 0.3
-                let x = min(max(r * cos(el) * sin(az), -g.halfWidth + m), g.halfWidth - m)
-                let y = min(max(r * cos(el) * cos(az), -g.back + m), g.front - m)
-                let z = min(max(r * sin(el), -g.floor + m), g.ceiling - m)
-                let d = (x * x + y * y + z * z).squareRoot()
-                let images: [(Double, Double, Double)] = [
-                    (-2 * g.halfWidth - x, y, z), (2 * g.halfWidth - x, y, z),
-                    (x, 2 * g.front - y, z), (x, -2 * g.back - y, z),
-                    (x, y, 2 * g.ceiling - z), (x, y, -2 * g.floor - z),
-                ]
-                for (wall, p) in images.enumerated() {
-                    let dist = (p.0 * p.0 + p.1 * p.1 + p.2 * p.2).squareRoot()
-                    let arrivalAz = atan2(p.0, p.1) * 180 / .pi
-                    let arrivalEl = atan2(p.2, (p.0 * p.0 + p.1 * p.1).squareRoot()) * 180 / .pi
-                    let cue = Cue(azimuth: arrivalAz, elevation: arrivalEl, sampleRate: sampleRate, renderer: .refined)
-                    let base = (dist - d) / c * sampleRate
-                    let gain = Float(Self.reflectance[wall] * d / dist)
-                    for ear in 0..<2 {
-                        let itd = Double(ear == 0 ? cue.delayL : cue.delayR)
-                        let cutoff = ear == 0 ? cue.shadowCutoffL : cue.shadowCutoffR
-                        let ild = ear == 0 ? cue.ildL : cue.ildR
-                        let cls: Int
-                        if arrivalEl > 20 { cls = Self.above }
-                        else if arrivalEl < -20 { cls = Self.below }
-                        else if cutoff >= 14000 { cls = 0 }
-                        else {
-                            let k = Self.shadowCutoffs.enumerated().min { abs(log($0.1 / cutoff)) < abs(log($1.1 / cutoff)) }!.offset
-                            cls = k + 1
-                        }
-                        let delay = max(1, Int((base + itd).rounded()))
-                        longest = max(longest, delay)
-                        list.append(Tap(group: gi, delay: delay, gain: gain * ild, bus: ear * Self.classes + cls))
-                    }
-                }
+        for (k, scale) in Self.earlyScale.enumerated() {
+            for (i, r) in Self.reflections.enumerated() {
+                // Classic's model: ITD from min(θ, 90°) + sin θ, far ear shadowed by laterality.
+                let j = k * n + i
+                let theta = abs(r.azimuth) * .pi / 180
+                let lateral = abs(sin(theta))
+                let itd = headDelay * (min(theta, .pi / 2) + sin(theta)) * sampleRate
+                let base = Int(r.delayMS * scale / 1000 * sampleRate)
+                nearDelay[j] = base; farDelay[j] = base + Int(itd.rounded())
+                longest = max(longest, farDelay[j])
+                nearGain[j] = r.gain; farGain[j] = r.gain * Float(1 - 0.45 * lateral)
+                side[j] = r.side; rightIsNear[j] = r.azimuth > 0
+                shadowCoef[j] = onePoleCoefficient(18000 * pow(1800.0 / 18000.0, lateral), sampleRate: sampleRate)
             }
-            return list
         }
-        let historySize = nextPowerOfTwo(atLeast: longest + maxFrames + 1)
-        historyMask = historySize - 1
-        history = (0..<groups.count).map { _ in makeBuffer(historySize) }
-        groupSilent = .allocate(capacity: max(groups.count, 1))
-        groupSilent.initialize(repeating: Int.max, count: max(groups.count, 1))
-        buses = (0..<(2 * Self.classes)).map { _ in makeBuffer(maxFrames) }
-        shadowCoef = Self.shadowCutoffs.map { onePoleCoefficient($0, sampleRate: sampleRate) }
-        shadowState = makeBuffer(8)
-        let (upBoost, upNotch) = Cue.elevationFilters(elevation: 45, sampleRate: sampleRate)
-        let (downBoost, downNotch) = Cue.elevationFilters(elevation: -35, sampleRate: sampleRate)
-        upFilters = .allocate(capacity: 4); upFilters.initialize(from: [upBoost, upNotch, upBoost, upNotch], count: 4)
-        downFilters = .allocate(capacity: 4); downFilters.initialize(from: [downBoost, downNotch, downBoost, downNotch], count: 4)
-        earlyHP = .allocate(capacity: 2); earlyHP.initialize(repeating: .highPass(200, sampleRate: sampleRate), count: 2)
-        earlyLPCoef = onePoleCoefficient(9000, sampleRate: sampleRate)
-        earlyL = makeBuffer(maxFrames); earlyR = makeBuffer(maxFrames)
+        let busSize = nextPowerOfTwo(atLeast: longest + 2)
+        busMask = busSize - 1
+        busL = makeBuffer(busSize); busR = makeBuffer(busSize)
+        earlyHP = .allocate(capacity: 2); earlyHP.initialize(repeating: .highPass(160, sampleRate: sampleRate), count: 2)
+        earlyLPCoef = onePoleCoefficient(7000, sampleRate: sampleRate)
 
         // Late tail, allocated for the largest room.
-        let largest = Self.geometry(.large).scale
+        let largest = Self.tailScale.max()!
         inputHP = .allocate(capacity: 2); inputHP.initialize(repeating: .highPass(80, sampleRate: sampleRate), count: 2)
         inputLPCoef = onePoleCoefficient(8000, sampleRate: sampleRate)
         var dmax: [Int] = []
         var dbufs: [UnsafeMutablePointer<Float>] = []
-        for side in 0..<2 {
-            for ms in Self.diffuserMS[side] {
-                let n = Int(ms / 1000 * largest * sampleRate) + 2
-                dmax.append(n); dbufs.append(makeBuffer(n))
+        for chain in 0..<Self.chains {
+            for ms in Self.diffuserMS[chain] {
+                let m = Int(ms / 1000 * largest * sampleRate) + 2
+                dmax.append(m); dbufs.append(makeBuffer(m))
             }
         }
         diffuserMax = dmax
-        diffusers = .allocate(capacity: 8); diffusers.initialize(from: dbufs, count: 8)
-        diffuserLength = .allocate(capacity: 8); diffuserLength.initialize(repeating: 1, count: 8)
-        diffuserIndex = .allocate(capacity: 8); diffuserIndex.initialize(repeating: 0, count: 8)
+        let stages = 4 * Self.chains
+        diffusers = .allocate(capacity: stages); diffusers.initialize(from: dbufs, count: stages)
+        diffuserLength = .allocate(capacity: stages); diffuserLength.initialize(repeating: 1, count: stages)
+        diffuserIndex = .allocate(capacity: stages); diffuserIndex.initialize(repeating: 0, count: stages)
         midGain = makeBuffer(8)
         lowShelf = .allocate(capacity: 8); lowShelf.initialize(repeating: Shelf(), count: 8)
         highShelf = .allocate(capacity: 8); highShelf.initialize(repeating: Shelf(), count: 8)
@@ -207,48 +168,52 @@ final class RefinedRoom {
         lines = .allocate(capacity: 8)
         lineLength = .allocate(capacity: 8)
         heads = .allocate(capacity: 8); heads.initialize(repeating: 0, count: 8)
+        var capacity: [Int] = []
         for j in 0..<8 {
-            let n = Int(Double(Self.fdnDelays48k[j]) * largest * rateScale) + 1
-            lines[j] = makeBuffer(n)
-            lineLength[j] = n
+            let m = Int(Double(Self.fdnDelays48k[j]) * largest * rateScale) + 1
+            lines[j] = makeBuffer(m)
+            lineLength[j] = m
+            capacity.append(m)
         }
+        lineCapacity = capacity
         configure(size: .medium)
         tune(RoomSettings())
         earlyGain = earlyTarget; lateGain = lateTarget
     }
 
     deinit {
-        for p in history + buses + predelayLine { p.deallocate() }
-        for j in 0..<8 { lines[j].deallocate(); diffusers[j].deallocate() }
-        lines.deallocate(); lineLength.deallocate(); heads.deallocate(); groupSilent.deallocate()
-        earlyL.deallocate(); earlyR.deallocate(); shadowState.deallocate()
-        upFilters.deallocate(); downFilters.deallocate(); earlyHP.deallocate(); inputHP.deallocate()
+        for p in [busL, busR, shadowState, nearGain, farGain, shadowCoef, midGain, fromGain, toGain] + predelayLine { p.deallocate() }
+        nearDelay.deallocate(); farDelay.deallocate(); side.deallocate(); rightIsNear.deallocate()
+        for j in 0..<8 { lines[j].deallocate() }
+        for k in 0..<(4 * Self.chains) { diffusers[k].deallocate() }
+        lines.deallocate(); lineLength.deallocate(); heads.deallocate()
+        earlyHP.deallocate(); inputHP.deallocate()
         diffusers.deallocate(); diffuserLength.deallocate(); diffuserIndex.deallocate()
-        midGain.deallocate(); lowShelf.deallocate(); highShelf.deallocate()
-        fromGain.deallocate(); toGain.deallocate(); fromLow.deallocate(); toLow.deallocate()
-        fromHigh.deallocate(); toHigh.deallocate()
+        lowShelf.deallocate(); highShelf.deallocate()
+        fromLow.deallocate(); toLow.deallocate(); fromHigh.deallocate(); toHigh.deallocate()
     }
 
     /// Switches room size (call while the room is silent: it starts empty).
     func configure(size: RoomSize) {
         sizeIndex = RoomSize.allCases.firstIndex(of: size)!
-        let g = Self.geometry(size)
+        let scale = Self.tailScale[sizeIndex]
         let rateScale = sampleRate / 48000
-        for j in 0..<8 { lineLength[j] = max(64, Int(Double(Self.fdnDelays48k[j]) * g.scale * rateScale)) }
-        for side in 0..<2 {
-            for (k, ms) in Self.diffuserMS[side].enumerated() {
-                diffuserLength[side * 4 + k] = min(diffuserMax[side * 4 + k], max(1, Int(ms / 1000 * g.scale * sampleRate)))
+        for j in 0..<8 { lineLength[j] = min(lineCapacity[j], max(64, Int(Double(Self.fdnDelays48k[j]) * scale * rateScale))) }
+        for chain in 0..<Self.chains {
+            for (k, ms) in Self.diffuserMS[chain].enumerated() {
+                diffuserLength[chain * 4 + k] = min(diffuserMax[chain * 4 + k], max(1, Int(ms / 1000 * scale * sampleRate)))
             }
         }
-        predelay = max(1, min(predelayMask, Int(0.004 * g.scale * sampleRate)))
+        predelay = max(1, min(predelayMask, Int(0.004 * scale * sampleRate)))
         decay = -1                      // line lengths changed: recompute the decay filters
         reset()
     }
 
     /// Decay, levels and bass. Cheap when nothing changed.
     func tune(_ r: RoomSettings) {
-        earlyTarget = muteEarly ? 0 : Self.earlyNorm * dbToGain(min(max(r.early, RoomSettings.levelRange.lowerBound), RoomSettings.levelRange.upperBound))
-        lateTarget = muteLate ? 0 : Self.lateNorm * dbToGain(min(max(r.late, RoomSettings.levelRange.lowerBound), RoomSettings.levelRange.upperBound))
+        let levels = RoomSettings.levelRange
+        earlyTarget = muteEarly ? 0 : Self.earlyNorm[sizeIndex] * dbToGain(min(max(r.early, levels.lowerBound), levels.upperBound))
+        lateTarget = muteLate ? 0 : Self.lateNorm[sizeIndex] * dbToGain(min(max(r.late, levels.lowerBound), levels.upperBound))
         let t = min(max(r.decay, RoomSettings.decayRange.lowerBound), RoomSettings.decayRange.upperBound)
         if t != decay {
             let first = decay < 0
@@ -313,93 +278,43 @@ final class RefinedRoom {
     }
 
     func reset() {
-        for p in history { vDSP_vclr(p, 1, vDSP_Length(historyMask + 1)) }
-        for g in 0..<groupCount { groupSilent[g] = Int.max }
-        writeIndex = 0
-        vDSP_vclr(shadowState, 1, 8)
-        for k in 0..<4 { upFilters[k].reset(); downFilters[k].reset() }
+        vDSP_vclr(busL, 1, vDSP_Length(busMask + 1)); vDSP_vclr(busR, 1, vDSP_Length(busMask + 1))
+        busWrite = 0
+        vDSP_vclr(shadowState, 1, vDSP_Length(Self.count))
         for k in 0..<2 { earlyHP[k].reset(); inputHP[k].reset() }
         earlyLPL = 0; earlyLPR = 0; inputLPL = 0; inputLPR = 0
-        for k in 0..<8 { vDSP_vclr(diffusers[k], 1, vDSP_Length(diffuserMax[k])); diffuserIndex[k] = 0 }
+        for k in 0..<(4 * Self.chains) { vDSP_vclr(diffusers[k], 1, vDSP_Length(diffuserMax[k])); diffuserIndex[k] = 0 }
         for p in predelayLine { vDSP_vclr(p, 1, vDSP_Length(predelayMask + 1)) }
         predelayIndex = 0
         for j in 0..<8 {
-            vDSP_vclr(lines[j], 1, vDSP_Length(Int(Double(Self.fdnDelays48k[j]) * Self.geometry(.large).scale * sampleRate / 48000) + 1))
+            vDSP_vclr(lines[j], 1, vDSP_Length(lineCapacity[j]))
             heads[j] = 0
             lowShelf[j].reset(); highShelf[j].reset()
         }
     }
 
-    /// Early reflections of one speaker direction (bench): delay in samples and gain per ear.
-    func taps(group: Int, size: RoomSize) -> [(ear: Int, delay: Int, gain: Float, above: Bool, below: Bool)] {
-        taps[RoomSize.allCases.firstIndex(of: size)!].filter { $0.group == group }.map {
-            let cls = $0.bus % Self.classes
-            return ($0.bus / Self.classes, $0.delay, $0.gain, cls == Self.above, cls == Self.below)
-        }
+    /// Early reflections of a size (bench): near- and far-ear delay in samples.
+    func reflectionDelays(size: RoomSize) -> [(near: Int, far: Int)] {
+        let t = RoomSize.allCases.firstIndex(of: size)! * Self.count
+        return (0..<Self.count).map { (nearDelay[t + $0], farDelay[t + $0]) }
     }
 
-    /// Adds the room to `outL/outR`. `groupSends[i]` is speaker direction i's send (valid when
-    /// `groupActive[i]`); `sendL/sendR` is the lateral bus that feeds the tail.
-    func process(groupSends: UnsafePointer<UnsafeMutablePointer<Float>>, groupActive: UnsafePointer<Bool>,
-                 sendL: UnsafePointer<Float>, sendR: UnsafePointer<Float>,
+    /// Adds the room to `outL/outR`. `sendL/sendR` is the lateral send bus; `lfe` (optional)
+    /// feeds the tail only.
+    func process(sendL: UnsafePointer<Float>, sendR: UnsafePointer<Float>, lfe: UnsafePointer<Float>?,
                  addingTo outL: UnsafeMutablePointer<Float>, _ outR: UnsafeMutablePointer<Float>, frames: Int) {
-        let frames = min(frames, maxFrames)
-        let n = vDSP_Length(frames)
-        let mask = historyMask, size = mask + 1
         if glide < 1 { applyGlide(glide + Double(frames) * glideStepPerFrame) }
-        let w = writeIndex
+        let t = sizeIndex * Self.count
+        let nearDelay = self.nearDelay + t, farDelay = self.farDelay + t
+        let nearGain = self.nearGain + t, farGain = self.farGain + t
+        let side = self.side + t, rightIsNear = self.rightIsNear + t
+        let shadowCoef = self.shadowCoef + t, shadowState = self.shadowState
+        let busL = self.busL, busR = self.busR, busMask = self.busMask
+        var w = busWrite
+        var ehl = earlyHP[0], ehr = earlyHP[1]
+        var el = earlyLPL, er = earlyLPR
+        let ec = earlyLPCoef
 
-        // 1. Each direction's send into its history (silence once, then nothing).
-        for g in 0..<groupCount {
-            let h = history[g]
-            let first = min(frames, size - w)
-            if groupActive[g] {
-                h.advanced(by: w).update(from: groupSends[g], count: first)
-                if first < frames { h.update(from: groupSends[g] + first, count: frames - first) }
-                groupSilent[g] = 0
-            } else if groupSilent[g] < size {
-                vDSP_vclr(h + w, 1, vDSP_Length(first))
-                if first < frames { vDSP_vclr(h, 1, vDSP_Length(frames - first)) }
-                groupSilent[g] += frames
-            }
-        }
-
-        // 2. Reflections into the ear buses.
-        for b in buses { vDSP_vclr(b, 1, n) }
-        for tap in taps[sizeIndex] where groupSilent[tap.group] < size {
-            let h = history[tap.group], bus = buses[tap.bus]
-            var gain = tap.gain
-            let start = (w - tap.delay) & mask
-            let first = min(frames, size - start)
-            vDSP_vsma(h + start, 1, &gain, bus, 1, bus, 1, vDSP_Length(first))
-            if first < frames { vDSP_vsma(h, 1, &gain, bus + first, 1, bus + first, 1, vDSP_Length(frames - first)) }
-        }
-        writeIndex = (w + frames) & mask
-
-        // 3. One filter per bus, summed per ear.
-        for ear in 0..<2 {
-            let out = ear == 0 ? earlyL : earlyR
-            let base = ear * Self.classes
-            out.update(from: buses[base], count: frames)
-            for k in 0..<4 {
-                let b = buses[base + 1 + k], c = shadowCoef[k]
-                var y = shadowState[ear * 4 + k]
-                for i in 0..<frames { y += c * (b[i] - y); out[i] += y }
-                shadowState[ear * 4 + k] = y
-            }
-            let up = buses[base + Self.above], down = buses[base + Self.below]
-            upFilters[ear * 2].run(up, frames); upFilters[ear * 2 + 1].run(up, frames)
-            downFilters[ear * 2].run(down, frames); downFilters[ear * 2 + 1].run(down, frames)
-            vDSP_vadd(out, 1, up, 1, out, 1, n)
-            vDSP_vadd(out, 1, down, 1, out, 1, n)
-            earlyHP[ear].run(out, frames)
-            var lp = ear == 0 ? earlyLPL : earlyLPR
-            let lc = earlyLPCoef
-            for i in 0..<frames { lp += lc * (out[i] - lp); out[i] = lp }
-            if ear == 0 { earlyLPL = lp } else { earlyLPR = lp }
-        }
-
-        // 4. Late tail.
         var hl = inputHP[0], hr = inputHP[1]
         var ll = inputLPL, lr = inputLPR
         let ic = inputLPCoef
@@ -427,8 +342,38 @@ final class RefinedRoom {
         }
 
         for i in 0..<frames {
-            let xl = hl.process(sendL[i]); ll += ic * (xl - ll)
-            let xr = hr.process(sendR[i]); lr += ic * (xr - lr)
+            // 1. Early reflections, Classic's network: condition the bus, then eight taps.
+            let xl = ehl.process(sendL[i]); el += ec * (xl - el)
+            let xr = ehr.process(sendR[i]); er += ec * (xr - er)
+            busL[w] = el
+            busR[w] = er
+            var l: Float = 0, r: Float = 0
+            for j in 0..<8 {
+                let near = nearDelay[j], far = farDelay[j]
+                let xn: Float, xf: Float
+                switch side[j] {
+                case -1: xn = busL[(w - near) & busMask]; xf = busL[(w - far) & busMask]
+                case 1: xn = busR[(w - near) & busMask]; xf = busR[(w - far) & busMask]
+                default:
+                    xn = 0.5 * (busL[(w - near) & busMask] + busR[(w - near) & busMask])
+                    xf = 0.5 * (busL[(w - far) & busMask] + busR[(w - far) & busMask])
+                }
+                shadowState[j] += shadowCoef[j] * (xf - shadowState[j])
+                let shadowed = shadowState[j]
+                if rightIsNear[j] {
+                    r += xn * nearGain[j]
+                    l += shadowed * farGain[j]
+                } else {
+                    l += xn * nearGain[j]
+                    r += shadowed * farGain[j]
+                }
+            }
+            w = (w + 1) & busMask
+
+            // 2. Late tail.
+            let bass = lfe?[i] ?? 0
+            let tl = hl.process(sendL[i] + bass); ll += ic * (tl - ll)
+            let tr = hr.process(sendR[i] + bass); lr += ic * (tr - lr)
             let dl = diffuse(ll, 0), dr = diffuse(lr, 4)
             pL[pi] = dl; pR[pi] = dr
             let inL = pL[(pi - pre) & pMask], inR = pR[(pi - pre) & pMask]
@@ -437,8 +382,8 @@ final class RefinedRoom {
             let s0 = lines[0][heads[0]], s1 = lines[1][heads[1]], s2 = lines[2][heads[2]], s3 = lines[3][heads[3]]
             let s4 = lines[4][heads[4]], s5 = lines[5][heads[5]], s6 = lines[6][heads[6]], s7 = lines[7][heads[7]]
             eg += eStep; lg += lStep
-            outL[i] += earlyL[i] * eg + (s0 + s1 + s2 + s3 - s4 - s5 - s6 - s7) * lg
-            outR[i] += earlyR[i] * eg + (s0 - s1 + s2 - s3 + s4 - s5 + s6 - s7) * lg
+            outL[i] += l * eg + diffuse(s0 + s1 + s2 + s3 - s4 - s5 - s6 - s7, 8) * lg
+            outR[i] += r * eg + diffuse(s0 - s1 + s2 - s3 + s4 - s5 + s6 - s7, 12) * lg
             let a0 = s0 + s1, a1 = s0 - s1, a2 = s2 + s3, a3 = s2 - s3
             let a4 = s4 + s5, a5 = s4 - s5, a6 = s6 + s7, a7 = s6 - s7
             let b0 = a0 + a2, b1 = a1 + a3, b2 = a0 - a2, b3 = a1 - a3
@@ -457,6 +402,9 @@ final class RefinedRoom {
             write(6, mixed.6, inL); write(7, mixed.7, -inR)
         }
         earlyGain = earlyTarget; lateGain = lateTarget
+        busWrite = w
+        earlyHP[0] = ehl; earlyHP[1] = ehr
+        earlyLPL = el; earlyLPR = er
         inputHP[0] = hl; inputHP[1] = hr
         inputLPL = ll; inputLPR = lr
         predelayIndex = pi

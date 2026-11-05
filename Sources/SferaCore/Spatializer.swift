@@ -66,11 +66,11 @@ public final class Spatializer: @unchecked Sendable {
     /// One head renderer per `Renderer` (indexed by `headIndex`); only the active one runs.
     private let heads: [HeadRenderer]
     private let room: Room
-    /// The Refined renderer's room: early reflections per speaker direction.
+    /// The Refined renderer's room (Classic's reflections by size, a new tail).
     private let refinedRoom: RefinedRoom
-    private let groupSends: UnsafeMutablePointer<UnsafeMutablePointer<Float>>
-    private let groupActive: UnsafeMutablePointer<Bool>
-    private let groupCount: Int
+    /// Refined: the LFE's send into the room's tail (the reflections stay above 160 Hz).
+    private let lfeSend: UnsafeMutablePointer<Float>
+    private var lfeSendActive = false
     private var appliedSize: RoomSize
     private var roomSilent = 0
     private var lfe: Biquad
@@ -147,13 +147,8 @@ public final class Spatializer: @unchecked Sendable {
             HeadRenderer(speakers: sortedSpeakers, sampleRate: sampleRate, maxFrames: maxFrames, renderer: $0)
         }
         room = Room(sampleRate: sampleRate)
-        let directions = heads[Self.headIndex(.refined)].groupDirections
-        groupCount = directions.count
-        refinedRoom = RefinedRoom(sampleRate: sampleRate, maxFrames: maxFrames, groups: directions)
-        groupSends = .allocate(capacity: max(groupCount, 1))
-        for g in 0..<groupCount { groupSends[g] = makeBuffer(maxFrames) }
-        groupActive = .allocate(capacity: max(groupCount, 1))
-        groupActive.initialize(repeating: false, count: max(groupCount, 1))
+        refinedRoom = RefinedRoom(sampleRate: sampleRate)
+        lfeSend = makeBuffer(maxFrames)
         appliedSize = settings.room.size
         refinedRoom.configure(size: appliedSize)
         refinedRoom.tune(settings.room)
@@ -209,8 +204,7 @@ public final class Spatializer: @unchecked Sendable {
         for p in inputs + ring + delayed + mix { p.deallocate() }
         for j in 0..<Upmixer.outputCount { upOut[j].deallocate() }
         upOut.deallocate()
-        for g in 0..<groupCount { groupSends[g].deallocate() }
-        groupSends.deallocate(); groupActive.deallocate()
+        lfeSend.deallocate()
         feeds.deallocate()
         for p in [ramp, dipRamp, spatL, spatR, sendL, sendR, origL, origR, lfeBuf] { p.deallocate() }
         lastActive.deallocate()
@@ -287,7 +281,6 @@ public final class Spatializer: @unchecked Sendable {
         }
         let renderer = appliedRenderer
         let refined = renderer == .refined
-        upmixer.coherentSteering = refined
         limiter.exactRelease = refined
 
         // 4. Content crossfade weight (0 = upmix, 1 = bed).
@@ -386,9 +379,7 @@ public final class Spatializer: @unchecked Sendable {
         vDSP_vclr(spatL, 1, n); vDSP_vclr(spatR, 1, n)
         vDSP_vclr(sendL, 1, n); vDSP_vclr(sendR, 1, n)
         heads[Self.headIndex(renderer)].process(feeds: feeds, frames: frames, direct: direct, send: send, dry: dry,
-                                               outL: spatL, outR: spatR, sendL: sendL, sendR: sendR,
-                                               groupSends: refined ? UnsafePointer(groupSends) : nil,
-                                               groupActive: refined ? groupActive : nil)
+                                               outL: spatL, outR: spatR, sendL: sendL, sendR: sendR)
 
         if let x = lfeFeed {
             // Classic: the LFE skips the direct-path level, so it moves against the mains as the
@@ -406,13 +397,13 @@ public final class Spatializer: @unchecked Sendable {
             lfe.run(lfeBuf, frames)
             vDSP_vadd(spatL, 1, lfeBuf, 1, spatL, 1, n)
             vDSP_vadd(spatR, 1, lfeBuf, 1, spatR, 1, n)
-            if refined, send > 0 {
-                // Refined: the LFE excites the room like a front speaker would, so the bass
-                // balance holds with "bass in room" (the tail's input decides how much gets in).
-                var k = send * 0.70710678
-                vDSP_vsma(lfeBuf, 1, &k, sendL, 1, sendL, 1, n)
-                vDSP_vsma(lfeBuf, 1, &k, sendR, 1, sendR, 1, n)
-            }
+        }
+        // Refined: the LFE excites the room's tail like a front speaker would, so the bass
+        // balance holds with "bass in room" (the tail's input decides how much gets in).
+        lfeSendActive = refined && send > 0 && lfeSilent < dormantAfter
+        if lfeSendActive {
+            var k = send * 0.70710678
+            vDSP_vsmul(lfeBuf, 1, &k, lfeSend, 1, n)
         }
 
         // Dip: the direct path, LFE and the room's input fade towards a pending change (and
@@ -422,9 +413,7 @@ public final class Spatializer: @unchecked Sendable {
             fillDip(frames: frames)
             if !dipAfterRoom { vDSP_vmul(spatL, 1, dipRamp, 1, spatL, 1, n); vDSP_vmul(spatR, 1, dipRamp, 1, spatR, 1, n) }
             vDSP_vmul(sendL, 1, dipRamp, 1, sendL, 1, n); vDSP_vmul(sendR, 1, dipRamp, 1, sendR, 1, n)
-            if refined {
-                for g in 0..<groupCount where groupActive[g] { vDSP_vmul(groupSends[g], 1, dipRamp, 1, groupSends[g], 1, n) }
-            }
+            if lfeSendActive { vDSP_vmul(lfeSend, 1, dipRamp, 1, lfeSend, 1, n) }
         }
 
         // The room runs until its tail has died away, in Dry too (Dry sends nothing).
@@ -433,12 +422,12 @@ public final class Spatializer: @unchecked Sendable {
             vDSP_maxmgv(sendL, 1, &sendPeak, n)
             vDSP_maxmgv(sendR, 1, &p, n)
             sendPeak = max(sendPeak, p)
+            if lfeSendActive { vDSP_maxmgv(lfeSend, 1, &p, n); sendPeak = max(sendPeak, p) }
             roomSilent = sendPeak == 0 ? roomSilent + frames : 0
             if roomSilent < dormantAfter {
                 if refined {
-                    if dry { for g in 0..<groupCount { groupActive[g] = false } }
                     refinedRoom.tune(settings.room)
-                    refinedRoom.process(groupSends: groupSends, groupActive: groupActive, sendL: sendL, sendR: sendR,
+                    refinedRoom.process(sendL: sendL, sendR: sendR, lfe: lfeSendActive ? UnsafePointer(lfeSend) : nil,
                                         addingTo: spatL, spatR, frames: frames)
                 } else {
                     room.process(sendL: sendL, sendR: sendR, addingTo: spatL, spatR, frames: frames, renderer: renderer)

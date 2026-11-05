@@ -49,79 +49,38 @@ private func impulse(channel: Int, renderer: Renderer) -> (Render, Int) {
 func refinedSuite() {
     print("\nRefined renderer (48 kHz, 512-frame blocks)")
 
-    // 1. Direction cues: model, then the rendered output.
-    let model = { (az: Double, el: Double) in Diagnostics.itd(azimuth: az, elevation: el, renderer: .refined) * 1000 }
-    let itd90 = model(90, 0)
-    expect("ITD model: 0 at 0° and 180°", model(0, 0) == 0 && model(180, 0) == 0,
-           String(format: "%.3f / %.3f ms", model(0, 0), model(180, 0)))
-    var monotonic = true
-    for az in stride(from: 0.0, to: 90, by: 5) where model(az + 5, 0) < model(az, 0) { monotonic = false }
-    for az in stride(from: 90.0, to: 180, by: 5) where model(az + 5, 0) > model(az, 0) { monotonic = false }
-    expect("ITD model: rises to 90°, falls to 180°", monotonic, String(format: "max %.3f ms at 90°", itd90))
-    expect("ITD model: 135° = 0.381 ms (Woodworth)", abs(model(135, 0) - 0.381) < 0.002, String(format: "%.3f ms (classic %.3f)",
-           model(135, 0), Diagnostics.itd(azimuth: 135, elevation: 0, renderer: .classic) * 1000))
-    expect("ITD model: height below its ear-plane speaker", model(30, 45) < model(30, 0) && model(135, 45) < model(135, 0),
-           String(format: "Ltf %.3f < L %.3f, Ltr %.3f < Lrs %.3f ms", model(30, 45), model(30, 0), model(135, 45), model(135, 0)))
-    for az in [0.0, 30, 60, 90] {
-        if abs(model(az, 0) - Diagnostics.itd(azimuth: az, elevation: 0, renderer: .classic) * 1000) > 1e-6 {
-            expect("ITD model: ear plane 0…90° unchanged from classic", false, "differs at \(az)°")
-        }
-    }
-    let back = Diagnostics.reflectionITDs(renderer: .refined)
-    let backWall = back.first { $0.azimuth == 180 }!.samples, ceiling = back.first { $0.azimuth == 0 }!.samples
-    let classicBack = Diagnostics.reflectionITDs(renderer: .classic).first { $0.azimuth == 180 }!.samples
-    expect("room: back wall and ceiling reflections, no ITD", backWall == 0 && ceiling == 0,
-           "back wall \(backWall) samples (classic \(classicBack)), ceiling \(ceiling)")
-
-    var lags: [String: (classic: Double, refined: Double)] = [:]
+    // 1. Direction cues: Refined keeps Classic's ITD, shadow and level (the physically
+    //    correct, smaller rear and height ITDs collapsed the image on headphones).
+    var worstLag = 0.0
+    var lagLine = "    rendered interaural lag (ms, + = right ear later):"
     for (name, ch) in [("L", 0), ("C", 2), ("Lss", 4), ("Rss", 5), ("Lrs", 6), ("Rrs", 7), ("Ltf", 10), ("Cts", 12), ("Ltr", 14)] {
         let (c, sc) = impulse(channel: ch, renderer: .classic)
         let (r, sr) = impulse(channel: ch, renderer: .refined)
         guard allFinite(r) else { expect("rendered \(name)", false, "non-finite output"); continue }
-        lags[name] = (lagMS(c, start: sc), lagMS(r, start: sr))
+        let a = lagMS(c, start: sc), b = lagMS(r, start: sr)
+        worstLag = max(worstLag, abs(a - b))
+        lagLine += String(format: "  %@ %.2f", name, b)
     }
-    print("    rendered interaural lag (ms, + = right ear later):  " + ["L", "Lss", "Lrs", "Ltf", "Ltr", "C", "Cts"].map {
-        String(format: "%@ %.2f→%.2f", $0, lags[$0]!.classic, lags[$0]!.refined) }.joined(separator: "  "))
-    let lss = abs(lags["Lss"]!.refined), lrs = abs(lags["Lrs"]!.refined)
-    expect("rendered: rear (Lrs) well inside side (Lss)", lrs < lss - 0.15, String(format: "Lrs %.2f vs Lss %.2f ms", lrs, lss))
-    expect("rendered: mirrored rear speakers mirror", abs(lags["Lrs"]!.refined + lags["Rrs"]!.refined) < 0.01
-           && abs(lags["Lss"]!.refined + lags["Rss"]!.refined) < 0.01,
-           String(format: "Lrs %+.3f / Rrs %+.3f ms", lags["Lrs"]!.refined, lags["Rrs"]!.refined))
-    expect("rendered: heights inside their ear-plane speaker", abs(lags["Ltf"]!.refined) < abs(lags["L"]!.refined) - 0.03
-           && abs(lags["Ltr"]!.refined) < lrs, String(format: "Ltf %.2f < L %.2f, Ltr %.2f < Lrs %.2f ms",
-           abs(lags["Ltf"]!.refined), abs(lags["L"]!.refined), abs(lags["Ltr"]!.refined), lrs))
-    expect("rendered: C and Cts centred", abs(lags["C"]!.refined) < 0.01 && abs(lags["Cts"]!.refined) < 0.01,
-           String(format: "%.3f / %.3f ms", lags["C"]!.refined, lags["Cts"]!.refined))
+    print(lagLine)
+    expect("rendered: interaural lags equal Classic's", worstLag < 0.01, String(format: "largest difference %.3f ms", worstLag))
+    let rearITD = Diagnostics.itd(azimuth: 135, elevation: 0) * 1000, sideITD = Diagnostics.itd(azimuth: 90, elevation: 0) * 1000
+    expect("ITD: rear wider than side (Classic's width)", rearITD > sideITD, String(format: "135° %.3f ms, 90° %.3f ms", rearITD, sideITD))
 
-    // 2. Upmix: a hard-panned source keeps its level (speaker-domain energy vs input).
+    // 2. Upmix: both renderers share it (the level-preserving steering moved +8 points of a
+    //    stereo mix into C). Its level for reference; the image is gated in the openness suite.
     do {
         let n = Int(3 * rate)
         var rng = Rng(s: 11)
         let src = (0..<n).map { _ in rng.next() * 0.3 }
         let silent = [Float](repeating: 0, count: n)
         let inputE = src.reduce(0.0) { $0 + Double($1) * Double($1) }
-        func gain(_ l: [Float], _ r: [Float], _ e: Double, _ renderer: Renderer, _ s: UpmixSettings = UpmixSettings()) -> Double {
+        func gain(_ l: [Float], _ r: [Float], _ e: Double) -> Double {
             let skip = Int(0.5 * rate)
-            let total = Diagnostics.upmixEnergies(left: l, right: r, settings: s, renderer: renderer, skip: skip)
-                .reduce(0) { $0 + $1.energy }
+            let total = Diagnostics.upmixEnergies(left: l, right: r, settings: UpmixSettings(), skip: skip).reduce(0) { $0 + $1.energy }
             return ratioDB(total, e * Double(n - skip - 2048) / Double(n))
         }
-        let centreE = 2 * inputE
-        let rows: [(String, [Float], [Float], Double)] = [("hard left", src, silent, inputE), ("centre", src, src, centreE),
-                                                          ("half left", src, src.map { $0 * 0.5 }, inputE * 1.25)]
-        var worst = 0.0
-        var line = "    upmix level vs input (dB, classic → refined):"
-        for (name, l, r, e) in rows {
-            let c = gain(l, r, e, .classic), f = gain(l, r, e, .refined)
-            worst = max(worst, abs(f))
-            line += String(format: "  %@ %+.2f → %+.2f", name, c, f)
-        }
-        print(line)
-        expect("upmix: panned and centred sources keep their level", worst < 0.25, String(format: "worst %+.2f dB", worst))
-        var wide = UpmixSettings(); wide.width = 1; wide.centerExtraction = 1
-        let w = gain(src, silent, inputE, .refined, wide)
-        expect("upmix: same at Centre 1, Width 1", abs(w) < 0.25, String(format: "hard left %+.2f dB (classic %+.2f)",
-               w, gain(src, silent, inputE, .classic, wide)))
+        print(String(format: "    upmix level vs input (dB): hard left %+.2f, centre %+.2f, half left %+.2f",
+                     gain(src, silent, inputE), gain(src, src, 2 * inputE), gain(src, src.map { $0 * 0.5 }, inputE * 1.25)))
     }
 
     // 3. Native surround: a fresh rear event after silence vs the same event with the bed held.
@@ -184,7 +143,14 @@ func refinedSuite() {
         let bedBurst = bed(2, active: active, seed: 3).map { $0.map { $0 * 3 } }
         let after = rewrite(channels: 16, settings: s)(concat([bedBurst, bedTail], channels: 16))
         let clean = rewrite(channels: 16, settings: s)(concat([silence(2, channels: 16), bedTail], channels: 16))
-        check("limiter: quiet after a limited burst is unaffected", compare(clean, after, seconds(4.5, 6)), limit: -120)
+        // Against the same burst kept below the limiter: what's left is the Far path's float
+        // rounding floor (Classic leaves the same without limiting), so the limiter adds nothing.
+        let soft = rewrite(channels: 16, settings: s)(concat([bedBurst.map { $0.map { $0 / 6 } }, bedTail], channels: 16))
+        let limited = compare(clean, after, seconds(4.5, 6)).rel, floor = compare(clean, soft, seconds(4.5, 6)).rel
+        let classicLimited = compare(classic(channels: 16, settings: s)(concat([silence(2, channels: 16), bedTail], channels: 16)),
+                                     classic(channels: 16, settings: s)(concat([bedBurst, bedTail], channels: 16)), seconds(4.5, 6)).rel
+        expect("limiter: quiet after a limited burst is unaffected", limited <= floor + 3,
+               String(format: "%.1f dB re signal; unlimited burst %.1f dB (Sfera 1.0: %.1f dB)", limited, floor, classicLimited))
         let tail = quiet(stereo(4, seed: 9))
         let burst = stereo(2, seed: 3).map { $0.map { $0 * 3 } }
         let sa = rewrite(channels: 2, settings: s)(concat([burst, tail], channels: 2))

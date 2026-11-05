@@ -1,10 +1,10 @@
 import Foundation
 import SferaCore
 
-// Phase 2: the Refined room. Classic's room (frozen) is the reference for level; the checks
-// are about what the new room adds: source-dependent early reflections, overhead and floor
-// reflections with an elevation cue, a frequency-dependent decay, bass in the room, and
-// clean switching between room sizes.
+// The Refined room. Classic's room (frozen) is the reference for level and, in the openness
+// suite, for how different the two ears are. The checks here are about what the new room
+// adds: reflections scaled by room size, a frequency-dependent decay that doesn't swell, bass
+// in the room, and clean switching between room sizes.
 
 private let rate = 48000.0
 
@@ -14,38 +14,40 @@ private func energy(_ x: [[Float]], _ range: Range<Int>) -> Double {
     return e
 }
 
-/// Zero-lag normalised correlation of two binaural responses over `range`.
-private func correlation(_ a: [[Float]], _ b: [[Float]], _ range: Range<Int>) -> Double {
-    var ab = 0.0, aa = 0.0, bb = 0.0
-    for ear in 0..<2 {
-        for i in range {
-            let x = Double(a[ear][i]), y = Double(b[ear][i])
-            ab += x * y; aa += x * x; bb += y * y
-        }
-    }
-    return ab / max((aa * bb).squareRoot(), 1e-30)
-}
-
 func roomSuite() {
     print("\nRefined room (48 kHz, Far, default room settings)")
-    let early = 0..<Int(0.05 * rate), late = Int(0.05 * rate)..<Int(2 * rate)
     let speakers: [Speaker] = [.l, .r, .c, .lss, .rss, .lrs, .rrs, .ltf, .rtr, .cts]
 
-    // 1. Level: the same early and late energy as Classic's room, summed over the bed.
-    var ce = 0.0, cl = 0.0, re = 0.0, rl = 0.0
-    var cDirect = 0.0, rDirect = 0.0
+    // 1. Level, per size: the same energy as Classic's room in the first 80 ms and after it,
+    //    summed over the bed.
+    let first = 0..<Int(0.08 * rate), after = Int(0.08 * rate)..<Int(2 * rate)
+    var ce = 0.0, cl = 0.0
+    var classicIR: [Speaker: [[Float]]] = [:]
     for s in speakers {
-        let c = Diagnostics.roomResponse(speaker: s, renderer: .classic)
-        let r = Diagnostics.roomResponse(speaker: s, renderer: .refined)
-        ce += energy(c.room, early); cl += energy(c.room, late)
-        re += energy(r.room, early); rl += energy(r.room, late)
-        cDirect += energy(c.direct, 0..<Int(0.01 * rate)); rDirect += energy(r.direct, 0..<Int(0.01 * rate))
+        let c = Diagnostics.roomResponse(speaker: s, renderer: .classic).room
+        classicIR[s] = c
+        ce += energy(c, first); cl += energy(c, after)
     }
-    let earlyDiff = db(re / ce), lateDiff = db(rl / cl)
-    print(String(format: "    room energy re Classic: 0–50 ms %+.2f dB, 50 ms+ %+.2f dB; direct path %+.2f dB (equal-distance heights)",
-                 earlyDiff, lateDiff, db(rDirect / cDirect)))
-    expect("level: room's first 50 ms match Classic", abs(earlyDiff) <= 1, String(format: "%+.2f dB", earlyDiff))
-    expect("level: room after 50 ms matches Classic", abs(lateDiff) <= 1, String(format: "%+.2f dB", lateDiff))
+    for size in RoomSize.allCases {
+        var st = RoomSettings(); st.size = size
+        var re = 0.0, rl = 0.0
+        for s in speakers {
+            let r = Diagnostics.roomResponse(speaker: s, renderer: .refined, room: st).room
+            re += energy(r, first); rl += energy(r, after)
+        }
+        let e = db(re / ce), l = db(rl / cl)
+        expect("level: \(size.label) room matches Classic's (0–80 ms, 80 ms+)", abs(e) <= 1 && abs(l) <= 1, String(format: "%+.2f / %+.2f dB", e, l))
+    }
+    // No swell: the tail decays from its start, like Classic's, instead of building up for
+    // 100 ms (the first version's tail sat 8–10 dB above Classic's at 150–200 ms).
+    let cIR = classicIR[.c]!, rIR = Diagnostics.roomResponse(speaker: .c, renderer: .refined).room
+    let cTot = energy(cIR, 0..<Int(2 * rate))
+    func level(_ x: [[Float]], _ ms: Double) -> Double { db(energy(x, Int(ms / 1000 * rate)..<Int((ms + 20) / 1000 * rate)) / cTot) }
+    let swell = [100.0, 150, 200].map { level(rIR, $0) - level(cIR, $0) }.max()!
+    print("    C room energy per 20 ms (dB re Classic's total) at 100/150/200 ms: classic "
+          + [100.0, 150, 200].map { String(format: "%.0f", level(cIR, $0)) }.joined(separator: " ")
+          + " · refined " + [100.0, 150, 200].map { String(format: "%.0f", level(rIR, $0)) }.joined(separator: " "))
+    expect("tail: no swell over Classic's (Medium, 100–200 ms)", swell <= 2, String(format: "at most %+.1f dB", swell))
 
     let bands = [125.0, 500, 1000, 2000, 4000, 8000]
     let rc = Diagnostics.decayTimes(renderer: .classic, bands: bands)
@@ -60,68 +62,32 @@ func roomSuite() {
         expect("decay: \(size.label) \(d) s", ok, String(format: "1 kHz %.2f s, 125 Hz ×%.2f, 8 kHz ×%.2f", t[2], t[0] / t[2], t[5] / t[2]))
     }
 
-    // 2. Reflections belong to the source: a side and a rear speaker on the same side used to
-    //    excite the same pattern (Classic pans both into one lateral bus).
-    let firstReflections = 0..<Int(0.03 * rate)
-    func earlyOnly(_ s: Speaker, _ r: Renderer) -> [[Float]] {
-        r == .classic ? Diagnostics.roomResponse(speaker: s, renderer: r, seconds: 0.1).room
-                      : Diagnostics.roomResponse(speaker: s, renderer: r, part: .early, seconds: 0.1).room
-    }
-    let pairs: [(Speaker, Speaker)] = [(.lss, .lrs), (.l, .lss), (.c, .cts)]
-    var line = "    early-reflection similarity (0–30 ms, 1 = same pattern):"
-    var worst = 0.0
-    for (a, b) in pairs {
-        let c = correlation(earlyOnly(a, .classic), earlyOnly(b, .classic), firstReflections)
-        let r = correlation(earlyOnly(a, .refined), earlyOnly(b, .refined), firstReflections)
-        worst = max(worst, r)
-        line += String(format: "  %@/%@ %.2f→%.2f", "\(a)".uppercased(), "\(b)".uppercased(), c, r)
-    }
-    print(line)
-    expect("reflections differ by source direction", worst < 0.5, String(format: "largest similarity %.2f", worst))
+    // 2. Reflections: Classic's pattern, scaled by size (Medium is Classic's timing), none
+    //    sooner than 8 ms.
+    let delays = RoomSize.allCases.map { Diagnostics.refinedReflectionDelays(size: $0) }
+    print("    reflections (ms, Small/Medium/Large): " + delays.map { d in d.map { String(format: "%.1f", $0) }.joined(separator: " ") }.joined(separator: " · "))
+    let classicDelays = [8.7, 10.3, 12.9, 16.4, 18.1, 22.6, 25.2, 29.8]
+    let medium = zip(delays[1], classicDelays).map { abs($0 - $1) }.max()!
+    expect("reflections: Medium at Classic's delays", medium < 0.03, String(format: "largest difference %.3f ms", medium))
+    expect("reflections: none before 8 ms, later in a bigger room", delays[0].min()! >= 7.98 && delays[0].max()! < delays[1].max()! && delays[1].max()! < delays[2].max()!,
+           String(format: "first %.1f / %.1f / %.1f ms, last %.1f / %.1f / %.1f ms", delays[0].min()!, delays[1].min()!, delays[2].min()!,
+                  delays[0].max()!, delays[1].max()!, delays[2].max()!))
 
-    let c = earlyOnly(.c, .refined)
-    check("C: left and right ear reflections identical", compare(Render(l: c[0], r: c[0], seconds: 0), Render(l: c[1], r: c[1], seconds: 0), 0..<c[0].count), limit: -100)
-    let lrs = earlyOnly(.lrs, .refined), rrs = earlyOnly(.rrs, .refined)
-    check("Lrs and Rrs reflections mirror", compare(Render(l: lrs[0], r: lrs[1], seconds: 0), Render(l: rrs[1], r: rrs[0], seconds: 0), 0..<lrs[0].count), limit: -100)
-
-    var missing: [String] = []
-    for s in Speaker.allCases where !s.isLFE {
-        let taps = Diagnostics.refinedReflections(speaker: s)
-        if !taps.contains(where: \.above) || !taps.contains(where: \.below) || taps.count != 12 { missing.append("\(s)") }
-    }
-    expect("every speaker: 6 reflections incl. ceiling and floor", missing.isEmpty, missing.isEmpty ? "15 speakers × 6 × 2 ears" : "missing: \(missing)")
-    // The floor stays at ear height − 1.2 m, so compare the median reflection.
-    let medianDelay = RoomSize.allCases.map { size in
-        let d = Diagnostics.refinedReflections(speaker: .l, size: size).map(\.delay).sorted()
-        return Double(d[d.count / 2]) / rate * 1000
-    }
-    expect("reflections later in a bigger room", medianDelay[0] < medianDelay[1] && medianDelay[1] < medianDelay[2],
-           String(format: "L median: %.1f / %.1f / %.1f ms (Small/Medium/Large)", medianDelay[0], medianDelay[1], medianDelay[2]))
-
-    // 3. Bass in the room: the tail only (reflections stay above 140 Hz so bass attacks
+    // 3. Bass in the room: the tail only (reflections stay above 200 Hz so bass attacks
     //    don't smear). Classic's tail for reference, measured after 50 ms.
     let tailRange = Int(0.05 * rate)..<Int(2 * rate)
     func tailBass(_ x: [[Float]]) -> Double { Diagnostics.bandEnergy(x.map { Array($0[tailRange]) }, center: 63) }
     let classicBass = tailBass(Diagnostics.roomResponse(speaker: .c, renderer: .classic).room)
     var none = RoomSettings(); none.bass = 0
+    var half = RoomSettings(); half.bass = 0.5
     var full = RoomSettings(); full.bass = 1
-    let bass = [none, RoomSettings(), full].map {
+    let bass = [none, RoomSettings(), half, full].map {
         db(tailBass(Diagnostics.roomResponse(speaker: .c, renderer: .refined, room: $0, part: .late).room) / classicBass)
     }
-    print(String(format: "    tail energy at 63 Hz re Classic: bass 0 %+.1f dB, 0.5 (default) %+.1f dB, 1 %+.1f dB", bass[0], bass[1], bass[2]))
-    expect("bass in room: each step adds low end", bass[1] >= bass[0] + 6 && bass[2] >= bass[1] + 3,
-           String(format: "%+.1f / %+.1f / %+.1f dB", bass[0], bass[1], bass[2]))
-
-    // 4. Elevation cue.
-    func g(_ el: Double, _ f: Double, _ r: Renderer) -> Double { Diagnostics.elevationGain(elevation: el, frequency: f, renderer: r) }
-    print(String(format: "    elevation filter at 45° (dB, 7 / 8.2 / 10.1 kHz): classic %+.1f %+.1f %+.1f · refined %+.1f %+.1f %+.1f",
-                 g(45, 7000, .classic), g(45, 8200, .classic), g(45, 10100, .classic), g(45, 7000, .refined), g(45, 8200, .refined), g(45, 10100, .refined)))
-    let flat = [1000.0, 4000, 7000, 10000, 14000].map { abs(g(0, $0, .refined)) }.max()!
-    expect("elevation: raised source gains 7 kHz, loses 10 kHz", g(45, 7000, .refined) >= 2.5 && g(45, 10100, .refined) <= -3,
-           String(format: "%+.1f / %+.1f dB", g(45, 7000, .refined), g(45, 10100, .refined)))
-    expect("elevation: ear plane untouched", flat < 0.01, String(format: "max %.3f dB", flat))
-    expect("elevation: notch moves up with height", g(60, 10800, .refined) < g(30, 10800, .refined) && g(30, 9200, .refined) < g(60, 9200, .refined),
-           String(format: "10.8 kHz: 30° %+.1f, 60° %+.1f dB", g(30, 10800, .refined), g(60, 10800, .refined)))
+    print(String(format: "    tail energy at 63 Hz re Classic: bass 0 %+.1f dB, 0.25 (default) %+.1f dB, 0.5 %+.1f dB, 1 %+.1f dB",
+                 bass[0], bass[1], bass[2], bass[3]))
+    expect("bass in room: each step adds low end", bass[1] >= bass[0] + 2 && bass[2] >= bass[1] + 2 && bass[3] >= bass[2] + 2,
+           String(format: "%+.1f / %+.1f / %+.1f / %+.1f dB", bass[0], bass[1], bass[2], bass[3]))
 
     // 5. Changing the room while playing.
     let n = Int(4 * rate), at = Int(2 * rate)
@@ -143,7 +109,7 @@ func roomSuite() {
         ("size Medium → Small", { $0.room.size = .small }),
         ("decay 0.45 → 1.2 s", { $0.room.decay = 1.2 }),
         ("early −12 dB, late +6 dB", { $0.room.early = -12; $0.room.late = 6 }),
-        ("bass in room 0.5 → 1", { $0.room.bass = 1 }),
+        ("bass in room 0.25 → 1", { $0.room.bass = 1 }),
     ]
     for (name, edit) in edits {
         let ratio = jumpRatio(rewrite(channels: 2, settings: farRefined(), change: (at, farRefined(edit)))([tone, tone]))

@@ -50,11 +50,11 @@ public enum RoomMode: String, Codable, CaseIterable, Sendable, Identifiable {
 /// Which renderer turns speaker feeds into headphone sound.
 ///
 /// - `classic`: Sfera 1.0 exactly (the bench holds it bit-identical to commit d18a518).
-/// - `refined`: geometry and mixing fixes (rear and height ITD/shadow from the true
-///   interaural angle, level-preserving centre steering, surround onsets at full level, an
-///   LFE balance that doesn't move with the room, a limiter that recovers fully, a moving
-///   pinna-notch elevation cue, equidistant heights) and its own room (`RefinedRoom`), shaped
-///   by `RoomSettings`.
+/// - `refined`: Classic's image (same head cues and upmix; the bench holds its interaural
+///   coherence at or below Classic's) with fixes (surround onsets at full level, an LFE
+///   balance that doesn't move with the room, a limiter that recovers fully) and its own
+///   room (`RefinedRoom`: Classic's reflections by room size, a smoother tail with
+///   frequency-dependent decay and bass), shaped by `RoomSettings`.
 public enum Renderer: String, Codable, CaseIterable, Sendable, Identifiable {
     case classic, refined
 
@@ -68,7 +68,7 @@ public enum Renderer: String, Codable, CaseIterable, Sendable, Identifiable {
     }
 }
 
-/// Size of the Refined renderer's virtual room (its geometry and the length of its tail lines).
+/// Size of the Refined renderer's virtual room (its reflection delays and tail lines).
 public enum RoomSize: String, Codable, CaseIterable, Sendable, Identifiable {
     case small, medium, large
 
@@ -93,8 +93,8 @@ public struct RoomSettings: Codable, Sendable, Hashable {
     public var early: Double = 0
     /// Late-tail level (dB re the calibrated default).
     public var late: Double = 0
-    /// The tail's high-pass: 0 = 160 Hz (Classic), 1 = 40 Hz. Reflections stay above 200 Hz.
-    public var bass: Double = 0.5
+    /// The tail's high-pass: 0 = 160 Hz (Classic), 1 = 40 Hz. Reflections stay above 160 Hz.
+    public var bass: Double = 0.25
 
     public static let decayRange = 0.25...1.2
     public static let levelRange = -12.0...6.0
@@ -107,7 +107,7 @@ public struct RoomSettings: Codable, Sendable, Hashable {
         decay = try c.decodeIfPresent(Double.self, forKey: .decay) ?? 0.45
         early = try c.decodeIfPresent(Double.self, forKey: .early) ?? 0
         late = try c.decodeIfPresent(Double.self, forKey: .late) ?? 0
-        bass = try c.decodeIfPresent(Double.self, forKey: .bass) ?? 0.5
+        bass = try c.decodeIfPresent(Double.self, forKey: .bass) ?? 0.25
     }
 }
 

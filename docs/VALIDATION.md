@@ -29,44 +29,53 @@ Every comparison in the bench fails on any non-finite sample, and a failed build
 
 `Bench/run.sh --refined` runs the Classic gate plus these; the full bench runs them too. Values from 2026-11-05.
 
+**Openness (the gate for every Refined change).** The listener prefers Classic's image: vocal in the head, instruments around it, backing vocals behind. The first Refined put everything between the ears (ENGINE.md, "Tried and reverted"). So Refined must not make the two ears more alike than Classic does. Measure: IACC, the largest normalised interaural cross-correlation within ±1 ms (1 = identical ears = inside the head). Margins are a quarter or less of the just-noticeable difference (about 0.08 near IACC 1, about 0.35 near 0; Gabriel & Colburn 1981): 0.02 for direct + room and whole mixes, 0.05 for the tail alone.
+
+| Check (Far) | Classic | Refined Small / Medium / Large |
+|---|---|---|
+| Stereo mix through upmix, head and room: centred vocal + guitar panned left + ambience | 0.74 | 0.73 / 0.74 / 0.74 |
+| … the vocal alone (also on L and R, as the upmix leaves it) | 0.87 | 0.87 / 0.87 / 0.88 |
+| … the guitar alone | 0.64 | 0.64 / 0.64 / 0.64 |
+| … the ambience alone | 0.23 | 0.23 / 0.23 / 0.23 |
+| Impulse on each of 12 speakers, direct + room, 0–0.5 s (C, L, Lss, Lrs, Ltf, Ltr shown) | 0.94, 0.68, 0.45, 0.52, 0.64, 0.49 | Medium 0.94, 0.68, 0.46, 0.52, 0.64, 0.50; all within 0.02 |
+| Room alone, 0–80 ms (limit 0.35) | 0.16–0.23 | 0.18–0.26 (the first Refined room: 0.93–0.99 for C) |
+| Room alone, 80–500 ms | 0.07–0.11 | 0.08–0.10 |
+
+**Renderer** (impulses and tones through the full engine):
+
 | Check | Classic | Refined |
 |---|---|---|
-| ITD model at 0° / 90° / 135° / 180° | 0 / 0.656 / 0.781 / 0.000 ms | 0 / 0.656 / 0.381 / 0 ms |
-| Rendered interaural lag (cross-correlation of an impulse): L, Lss, Lrs, Ltf, Ltr, C, Cts | 0.27, 0.67, 0.79, 0.27, 0.79, 0, 0 ms | 0.27, 0.67, 0.39, 0.19, 0.27, 0, 0 ms; Rrs mirrors Lrs |
-| Upmix level vs input: hard left, centre, half left (default tuning) | +2.49, 0.00, +2.21 dB | 0.00, 0.00, 0.00 dB (also at Centre 1, Width 1) |
+| Rendered interaural lag: L, Lss, Lrs, Ltf, Ltr, C, Cts | 0.27, 0.67, 0.79, 0.27, 0.79, 0, 0 ms | identical (largest difference 0.000 ms) |
+| Upmix level vs input: hard left, centre, half left | +2.49, 0.00, +2.21 dB | the same (shared upmix) |
 | New rear-only event in a bed, first 30 ms | −2.78 dB | 0.00 dB |
-| LFE vs centre at 45 Hz, Dry / Near / Mid / Far | +6.7 / +5.1 / +6.6 / +9.5 dB | +9.7 / +9.6 / +9.6 / +9.6 dB (spread 0.12, limit 0.25; same with default bass in room) |
-| Quiet after a limited burst (5.1 bed) | −72.8 dB (known stall) | −134.8 dB |
+| LFE vs centre at 45 Hz, Dry / Near / Mid / Far | +6.7 / +5.1 / +6.6 / +9.5 dB | +9.7 / +9.6 / +9.6 / +9.5 dB (spread 0.20, limit 0.25; same with default bass in room) |
+| Quiet after a limited burst (5.1 bed), vs the same burst kept below the limiter | −72.8 dB (known stall) | −113.7 dB, unlimited −110.1 dB: the limiter leaves nothing above the Far path's float rounding floor |
 
 **Room** (Far, impulse responses of the head renderer + room, default room settings):
 
 | Check | Classic | Refined |
 |---|---|---|
-| Room energy, 0–50 ms / after 50 ms, ten bed speakers | reference | +0.01 / +0.30 dB (limit ±1) |
-| T30 at 125 / 500 / 1k / 2k / 4k / 8k Hz | 0.41 0.42 0.40 0.38 0.32 0.26 s | 0.52 0.50 0.45 0.38 0.31 0.23 s |
-| Decay setting vs measured at 1 kHz (limit ±12 %; 125 Hz ≥ 1.1×, 8 kHz ≤ 0.8×) | — | Medium 0.45 → 0.45 s; Small 0.45 → 0.46; Medium 0.8 → 0.80; Large 0.8 → 0.80 |
-| Similarity of early reflections (0–30 ms, zero-lag correlation): Lss/Lrs, L/Lss, C/Cts | 0.98, 0.94, 1.00 | 0.26, 0.28, −0.01 (limit 0.5) |
-| C: left and right ear reflections; Lrs vs Rrs mirrored | — | bit-identical; bit-identical |
-| Reflections per speaker | 8 shared | 6 per speaker × 15 speakers, each with a ceiling and a floor reflection |
-| Median reflection delay for L, Small / Medium / Large | — | 5.4 / 7.4 / 11.9 ms |
-| Tail energy at 63 Hz re Classic, bass in room 0 / 0.5 / 1 | — | −1.1 / +7.1 / +10.5 dB |
-| Elevation filter at 45°, 7 / 8.2 / 10.1 kHz | −3.0 / −3.7 / −2.5 dB | +3.0 / +0.9 / −5.0 dB; 0 dB at the ear plane; the notch moves up with elevation |
-| Direct path, ten bed speakers | reference | −0.89 dB (heights now equidistant) |
+| Room energy, 0–80 ms / after 80 ms, ten bed speakers, Small / Medium / Large | reference | +0.02 / +0.00, +0.00 / +0.00, +0.00 / −0.00 dB (limit ±1) |
+| C's room energy per 20 ms at 100 / 150 / 200 ms (re Classic's total) | −23 / −31 / −40 dB | −25 / −35 / −43 dB (no swell; limit +2 dB over Classic) |
+| T30 at 125 / 500 / 1k / 2k / 4k / 8k Hz | 0.41 0.42 0.40 0.38 0.32 0.26 s | 0.52 0.50 0.46 0.37 0.28 0.20 s |
+| Decay setting vs measured at 1 kHz (limit ±12 %; 125 Hz ≥ 1.1×, 8 kHz ≤ 0.8×) | — | Medium 0.45 → 0.46 s; Small 0.45 → 0.45; Medium 0.8 → 0.80; Large 0.8 → 0.83 |
+| Reflection delays, Small / Medium / Large | 8.7–29.8 ms | 8.0–27.4 / 8.7–29.8 (Classic's, within 0.02 ms) / 11.3–38.7 ms |
+| Tail energy at 63 Hz re Classic, bass in room 0 / 0.25 (default) / 0.5 / 1 | — | −6.7 / −2.4 / +1.1 / +4.7 dB |
 
-Changing the room while a 100 Hz tone plays (same metric as below): size Medium → Large ×1.02, → Small ×1.01, decay 0.45 → 1.2 s ×0.98, early −12 dB and tail +6 dB ×1.00, bass 0.5 → 1 ×1.03. After a size change the old room is gone (−146.9 dB re signal on a 5.1 bed; without the change it would still be at −6.8 dB). Refined Far runs finite and limited at 44.1 kHz (irregular blocks ≤ 1024), 96 kHz (≤ 256) and 192 kHz (4096-frame blocks), stereo and 9.1.6, every room size.
+Changing the room while a 100 Hz tone plays (same metric as below): size Medium → Large ×1.05, → Small ×1.03, decay 0.45 → 1.2 s ×1.00, early −12 dB and tail +6 dB ×1.00, bass 0.25 → 1 ×1.06. After a size change the old room is gone (−149.3 dB re signal on a 5.1 bed; without the change it would still be at −5.8 dB). Refined Far runs finite and limited at 44.1 kHz (irregular blocks ≤ 1024), 96 kHz (≤ 256) and 192 kHz (4096-frame blocks), stereo and 9.1.6, every room size.
 
 **Switching.** A 100 Hz tone with a change at 2 s; the largest sample-to-sample step within 43 ms before to 125 ms after it, relative to the largest step in a steady stretch before (1–1.9 s) or after (2.6–3.5 s). A discontinuity shows as ×2 and more; the dip and the room building up again move the level smoothly and stay under the ×1.25 limit.
 
 | Change | 1.0 (`d18a518`) | Classic now | Refined |
 |---|---|---|---|
-| Far → Mid | ×2.10 | ×1.09 | ×1.01 |
+| Far → Mid | ×2.10 | ×1.09 | ×1.08 |
 | Far → Dry | ×7.95 | ×1.00 | ×1.00 |
-| Dry → Far | ×11.09 | ×1.10 | ×1.05 |
-| Far: Classic → Refined / Refined → Classic | — | ×1.05 / ×1.02 | |
+| Dry → Far | ×11.09 | ×1.10 | ×1.10 |
+| Far: Classic → Refined / Refined → Classic | — | ×1.10 / ×1.10 | |
 
-**No stale room.** Far with loud noise on a 5.1 bed, Dry with a quiet tone for 2 s, then Far again, compared with the same run starting from silence: −334 dB (Classic), −269 dB (Refined). In 1.0 the old room returned at −13.7 dB re signal (stereo).
+**No stale room.** Far with loud noise on a 5.1 bed, Dry with a quiet tone for 2 s, then Far again, compared with the same run starting from silence: −334 dB (Classic), −282 dB (Refined). In 1.0 the old room returned at −13.7 dB re signal (stereo).
 
-**Why the stale-room and limiter checks use a 5.1 bed.** On stereo, the upmixer's steering still remembers loud material for a few seconds, so the stereo versions differ by −108 dB (stale room) and −102 dB (limiter) on Refined, whose per-speaker reflections expose small steering differences that Classic's two-bus room averaged out (Classic: −262 dB). Shrinking the old noise by 60 dB removes the difference entirely (−323 dB), so it is that state, not the room or limiter; the bench prints the stereo figures for reference.
+**Why the stale-room and limiter checks use a 5.1 bed.** On stereo, the upmixer's steering still remembers loud material for a few seconds, so a stereo run compares that state too, not just the room or the limiter. The bench prints the stereo figures for reference (now −262 dB for both renderers).
 
 The gate in §2 has no mid-stream room or renderer changes, so the new switching behaviour (which also applies to Classic) doesn't affect it.
 
@@ -109,7 +118,7 @@ Same bench: one core, release build, 512-frame blocks. Per second of audio:
 | 9.1.6 Atmos via BlackHole | 3.57 % | 0.32 % | 11× less |
 | Nothing playing | 2.53 % | 0.08 % | 30× less |
 
-Those are the Classic renderer. Refined (its own room with per-speaker reflections): stereo 1.06 % vs Classic 0.72 %, 9.1.6 Atmos 0.66 % vs 0.32 %.
+Those are the Classic renderer. Refined (its own room tail): stereo 0.78 % vs Classic 0.72 %, 9.1.6 Atmos 0.36 % vs 0.32 %.
 
 These count the DSP only. The app adds less on top than 0.9 did: no ring buffer, no AVAudioEngine, no second thread hop, no always-on 20 Hz UI timer.
 
@@ -153,6 +162,7 @@ The routing rules are 0.9's, after three bugs found on 2026-11-04/05:
 
 ## 10. Not verified
 
+- Listening to the revised Refined (Classic's image with the new room). The first Refined failed by ear while passing every check it had; the openness gate in §3 was added for that reason, but only the listener can confirm it.
 - Listening tests of 1.0 against 0.9. The bench says they're the same to −83 dB in steady state, but switch fades are different (section 3).
 - `Scripts/check.sh` reports hardware probes that don't pass as "not passed" at the end instead of finishing with a success line. `STRICT=1` makes them fatal.
 - The process tap in a normal user session (run `--tap-probe` and `--route-probe` from Terminal).

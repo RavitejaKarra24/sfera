@@ -19,45 +19,12 @@ struct Cue {
     static let headRadius = 0.0875
     static let speedOfSound = 343.0
     static let maxITD = headRadius / speedOfSound * (.pi + 1)
-    /// Largest ITD of the refined model (a source at ±90°): (a/c)(π/2 + 1) ≈ 0.656 ms.
-    static let maxLateralITD = headRadius / speedOfSound * (.pi / 2 + 1)
-
-    init(azimuth: Double, elevation: Double, sampleRate: Double, renderer: Renderer) {
-        switch renderer {
-        case .classic: self.init(classicAzimuth: azimuth, elevation: elevation, sampleRate: sampleRate)
-        case .refined: self.init(refinedAzimuth: azimuth, elevation: elevation, sampleRate: sampleRate)
-        }
-    }
-
-    /// Spherical-head cues from the true interaural (lateral) angle: θ = asin(|sin az · cos el|).
-    /// Woodworth ITD (a/c)(θ + sin θ) rises to ±90° and falls back to zero behind the head;
-    /// a height speaker sits closer to the median plane than the speaker below it, so it gets
-    /// less ITD and shadow. Ear-plane speakers from −90° to 90° get exactly the classic values.
-    private init(refinedAzimuth azimuth: Double, elevation: Double, sampleRate: Double) {
-        let az = azimuth * .pi / 180, el = elevation * .pi / 180
-        let raw = sin(az) * cos(el)                          // signed: + = right
-        let sinLat = abs(raw) < 1e-12 ? 0 : raw              // exactly 0 at 0° and 180°
-        let theta = asin(min(abs(sinLat), 1))
-        let rear = max(0, (abs(azimuth) / 180 - 0.5) * 2) * cos(el)
-        let shadowLeft = min(max(max(sinLat, 0) * 0.95 + rear * 0.35, 0), 1)
-        let shadowRight = min(max(max(-sinLat, 0) * 0.95 + rear * 0.35, 0), 1)
-        let elevationNorm = min(max(elevation / 60.0, 0), 1)
-        let itdSeconds = Cue.headRadius / Cue.speedOfSound * (theta + abs(sinLat))
-        let panAngle = (sinLat + 1) * .pi / 4
-        shadowCutoffL = 18000 * pow(1100.0 / 18000.0, shadowLeft)
-        shadowCutoffR = 18000 * pow(1100.0 / 18000.0, shadowRight)
-        notchGainDB = -5.0 * elevationNorm
-        delayL = sinLat > 0 ? Float(itdSeconds * sampleRate) : 0
-        delayR = sinLat < 0 ? Float(itdSeconds * sampleRate) : 0
-        ildL = Float(1 - 0.28 * shadowLeft)
-        ildR = Float(1 - 0.28 * shadowRight)
-        panL = Float(cos(panAngle))
-        panR = Float(sin(panAngle))
-    }
-
-    /// Sfera 1.0's cues (kept exactly): ITD from the raw azimuth, so it keeps growing behind
-    /// the head, and heights take the ear-plane cues of their azimuth.
-    private init(classicAzimuth azimuth: Double, elevation: Double, sampleRate: Double) {
+    /// Both renderers use these cues (Sfera 1.0's). The ITD comes from the raw azimuth, so it
+    /// keeps growing behind the head, and heights take the ear-plane cues of their azimuth.
+    /// Refined tried the physically correct values (Woodworth on the true lateral angle: less
+    /// ITD behind the head and for heights) and lost the width on headphones; with a synthetic
+    /// head the larger values are the better perceptual choice.
+    init(azimuth: Double, elevation: Double, sampleRate: Double) {
         let lateral = sin(azimuth * .pi / 180)
         let rear = max(0, (abs(azimuth) / 180 - 0.5) * 2)
         let shadowLeft = min(max(max(lateral, 0) * 0.95 + rear * 0.35, 0), 1)
@@ -75,24 +42,6 @@ struct Cue {
         panL = Float(cos(panAngle))
         panR = Float(sin(panAngle))
     }
-
-    /// Refined elevation cue, relative to the ear plane: the pinna's first notch moves up with
-    /// elevation (≈ 6.5–7 kHz in front, ≈ 10–11 kHz at 60°; Iida et al. 2007), so a raised
-    /// source gains energy around 7 kHz (Blauert's "above" band) and loses it higher up.
-    /// Below the ear plane the notch moves down instead. Identity at 0°.
-    static func elevationFilters(elevation: Double, sampleRate: Double) -> (Biquad, Biquad) {
-        let e = min(max(elevation / 60, -1), 1)
-        if e >= 0 {
-            return (.peaking(7000, gainDB: 5 * e, q: 1.8, sampleRate: sampleRate),
-                    .peaking(8000 * (1 + 0.35 * e), gainDB: -8 * e, q: 3, sampleRate: sampleRate))
-        }
-        return (.peaking(7000, gainDB: 3 * e, q: 1.8, sampleRate: sampleRate),
-                .peaking(8000 * (1 + 0.3 * e), gainDB: 6 * e, q: 3, sampleRate: sampleRate))
-    }
-
-    /// Refined: every bed speaker is equidistant, as the mix assumes (the ear-plane value of
-    /// `distanceGain`). Classic's elevated speakers came out up to 2.5 dB louder.
-    static let equalDistanceGain = Float(1 / 1.7)
 
     /// 1 / (1 + 0.7·r), r = horizontal radius of the speaker on the unit sphere
     /// (elevated speakers sit closer to the head axis, so they're a little louder).
@@ -162,22 +111,17 @@ struct FractionalDelay {
 
 /// Renders speaker feeds to two ears.
 ///
-/// The model is linear and time-invariant per direction. Classic: speakers that share an
-/// azimuth (L and Ltf, C/Cts/Cfh, Lrs and Ltr…) are summed before one shared
-/// head-shadow + ITD chain; speakers at the same elevation share one notch, which both
-/// ears use. Refined: a height speaker has its own lateral angle, so every direction
-/// (azimuth and elevation) gets its own chain. A chain whose feeds have been silent for a
-/// second goes idle and costs nothing.
+/// The model is linear and time-invariant per direction. Speakers that share an azimuth
+/// (L and Ltf, C/Cts/Cfh, Lrs and Ltr…) are summed before one shared head-shadow + ITD
+/// chain; speakers at the same elevation share one notch, which both ears use. A chain whose
+/// feeds have been silent for a second goes idle and costs nothing. Both renderers render
+/// identically, except that Refined sizes the ITD delay line for high sample rates.
 final class HeadRenderer {
     private final class Bus {
         let members: [(speaker: Int, distance: Float)]
         var notch: Biquad
-        /// Refined: the moving pinna notch (the boost is `notch`).
-        var extra: Biquad?
         var silentFrames = Int.max
-        init(members: [(Int, Float)], notch: Biquad, extra: Biquad? = nil) {
-            self.members = members; self.notch = notch; self.extra = extra
-        }
+        init(members: [(Int, Float)], notch: Biquad) { self.members = members; self.notch = notch }
     }
 
     private final class Group {
@@ -206,7 +150,7 @@ final class HeadRenderer {
         func reset() {
             stateL = 0; stateR = 0
             farDelay?.reset()
-            for bus in buses { bus.notch.reset(); bus.extra?.reset() }
+            for bus in buses { bus.notch.reset() }
         }
     }
 
@@ -215,8 +159,6 @@ final class HeadRenderer {
     private let groupBuffer: UnsafeMutablePointer<Float>
     private let busBuffer: UnsafeMutablePointer<Float>
     private let idleAfter: Int
-    /// Direction of each chain (azimuth, elevation in degrees), in the order of `groupSends`.
-    let groupDirections: [(azimuth: Double, elevation: Double)]
 
     /// `speakers`: the feeds this renderer can receive (LFE excluded).
     init(speakers: [Speaker], sampleRate: Double, maxFrames: Int, renderer: Renderer = .classic) {
@@ -225,40 +167,26 @@ final class HeadRenderer {
         busBuffer = makeBuffer(maxFrames)
         idleAfter = Int(sampleRate)
         // Classic clamps delays at 127 samples (it asks for more at 176.4/192 kHz); refined
-        // sizes the line for its largest ITD at this rate.
+        // sizes the line for the largest ITD at this rate.
         let delayLength = renderer == .classic ? FractionalDelay.classicLength
-            : max(FractionalDelay.classicLength, Int((Cue.maxLateralITD * sampleRate).rounded(.up)) + 3)
-        // Classic: one chain per azimuth, cues from the ear plane. Refined: one per direction.
-        struct Key: Hashable, Comparable {
-            let azimuth: Double, elevation: Double
-            static func < (a: Key, b: Key) -> Bool { (a.azimuth, a.elevation) < (b.azimuth, b.elevation) }
-        }
-        var byKey: [Key: [Speaker]] = [:]
-        for s in speakers where !s.isLFE {
-            byKey[Key(azimuth: s.azimuth, elevation: renderer == .classic ? 0 : s.elevation), default: []].append(s)
-        }
-        groups = byKey.keys.sorted().map { key in
-            let azimuth = key.azimuth
-            let members = byKey[key]!.sorted { $0.rawValue < $1.rawValue }
-            let cue = Cue(azimuth: azimuth, elevation: key.elevation, sampleRate: sampleRate, renderer: renderer)
-            func distance(_ s: Speaker) -> Float {
-                renderer == .classic ? Cue.distanceGain(azimuth: s.azimuth, elevation: s.elevation) : Cue.equalDistanceGain
-            }
+            : max(FractionalDelay.classicLength, Int((Cue.maxITD * sampleRate).rounded(.up)) + 3)
+        // One chain per azimuth, cues from the ear plane.
+        var byAzimuth: [Double: [Speaker]] = [:]
+        for s in speakers where !s.isLFE { byAzimuth[s.azimuth, default: []].append(s) }
+        groups = byAzimuth.keys.sorted().map { azimuth in
+            let members = byAzimuth[azimuth]!.sorted { $0.rawValue < $1.rawValue }
+            let cue = Cue(azimuth: azimuth, elevation: 0, sampleRate: sampleRate)
+            func distance(_ s: Speaker) -> Float { Cue.distanceGain(azimuth: s.azimuth, elevation: s.elevation) }
             let plain = members.filter { !$0.isHeight }.map { ($0.rawValue, distance($0)) }
             var byElevation: [Double: [Speaker]] = [:]
             for s in members where s.isHeight { byElevation[s.elevation, default: []].append(s) }
             let buses = byElevation.keys.sorted().map { elevation in
                 let members = byElevation[elevation]!.map { ($0.rawValue, distance($0)) }
-                if renderer == .refined {
-                    let (boost, notch) = Cue.elevationFilters(elevation: elevation, sampleRate: sampleRate)
-                    return Bus(members: members, notch: boost, extra: notch)
-                }
-                let gainDB = Cue(azimuth: azimuth, elevation: elevation, sampleRate: sampleRate, renderer: renderer).notchGainDB
+                let gainDB = Cue(azimuth: azimuth, elevation: elevation, sampleRate: sampleRate).notchGainDB
                 return Bus(members: members, notch: .peaking(8200, gainDB: gainDB, q: 1.3, sampleRate: sampleRate))
             }
             return Group(cue: cue, sampleRate: sampleRate, plain: plain, buses: buses, delayLength: delayLength)
         }
-        groupDirections = byKey.keys.sorted().map { ($0.azimuth, $0.elevation) }
     }
 
     deinit {
@@ -278,27 +206,14 @@ final class HeadRenderer {
     /// Adds the binaural render of `feeds` (indexed by `Speaker.rawValue`; nil = silent)
     /// to `outL/outR`, and the room send to `sendL/sendR`.
     /// `direct`: direct-path level; `send`: room send level (0 = no room).
-    /// `groupSends` (optional): each chain's own mono send, for a room with source-dependent
-    /// reflections; `groupActive[i]` says whether chain i wrote one this block.
     func process(feeds: UnsafePointer<UnsafeMutablePointer<Float>?>, frames: Int,
                  direct: Float, send: Float, dry: Bool,
                  outL: UnsafeMutablePointer<Float>, outR: UnsafeMutablePointer<Float>,
-                 sendL: UnsafeMutablePointer<Float>, sendR: UnsafeMutablePointer<Float>,
-                 groupSends: UnsafePointer<UnsafeMutablePointer<Float>>? = nil,
-                 groupActive: UnsafeMutablePointer<Bool>? = nil) {
+                 sendL: UnsafeMutablePointer<Float>, sendR: UnsafeMutablePointer<Float>) {
         let n = vDSP_Length(frames)
         let gbuf = groupBuffer, bbuf = busBuffer
 
-        for (gi, g) in groups.enumerated() {
-            groupActive?[gi] = false
-            // This chain's own room send (un-notched, like the lateral bus).
-            @inline(__always) func addSend(_ x: UnsafeMutablePointer<Float>) {
-                guard let groupSends, let groupActive, send > 0 else { return }
-                var s = send
-                if groupActive[gi] { vDSP_vsma(x, 1, &s, groupSends[gi], 1, groupSends[gi], 1, n) }
-                else { vDSP_vsmul(x, 1, &s, groupSends[gi], 1, n) }
-                groupActive[gi] = true
-            }
+        for g in groups {
             // Plain members → group buffer.
             var any = false
             for m in g.plain {
@@ -330,7 +245,6 @@ final class HeadRenderer {
             if any, send > 0 {
                 vDSP_vsma(gbuf, 1, &sl, sendL, 1, sendL, 1, n)
                 vDSP_vsma(gbuf, 1, &sr, sendR, 1, sendR, 1, n)
-                addSend(gbuf)
             }
 
             // Elevated members: sum per elevation, shared notch, into the group buffer.
@@ -353,10 +267,8 @@ final class HeadRenderer {
                 if send > 0 {
                     vDSP_vsma(bbuf, 1, &sl, sendL, 1, sendL, 1, n)
                     vDSP_vsma(bbuf, 1, &sr, sendR, 1, sendR, 1, n)
-                    if busAny { addSend(bbuf) }
                 }
                 b.notch.run(bbuf, frames)
-                if b.extra != nil { b.extra!.run(bbuf, frames) }
                 if any { vDSP_vadd(gbuf, 1, bbuf, 1, gbuf, 1, n) } else { gbuf.update(from: bbuf, count: frames) }
                 any = true
             }

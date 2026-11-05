@@ -110,6 +110,7 @@ if args.contains("--classic") { finish() }
 
 refinedSuite()
 roomSuite()
+opennessSuite()
 transitionSuite()
 if args.contains("--refined") { finish() }
 

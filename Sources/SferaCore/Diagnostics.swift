@@ -3,9 +3,9 @@ import Foundation
 
 /// Read-only views into the engine for the bench and probes. Not used by the app's audio path.
 public enum Diagnostics {
-    /// Interaural time difference of a direction in seconds (far ear minus near ear).
-    public static func itd(azimuth: Double, elevation: Double, sampleRate: Double = 48000, renderer: Renderer) -> Double {
-        let cue = Cue(azimuth: azimuth, elevation: elevation, sampleRate: sampleRate, renderer: renderer)
+    /// Interaural time difference of a direction in seconds (far ear minus near ear; both renderers).
+    public static func itd(azimuth: Double, elevation: Double, sampleRate: Double = 48000) -> Double {
+        let cue = Cue(azimuth: azimuth, elevation: elevation, sampleRate: sampleRate)
         return Double(max(cue.delayL, cue.delayR)) / sampleRate
     }
 
@@ -16,10 +16,10 @@ public enum Diagnostics {
 
     /// Energy of each stereo-upmix output (speaker name, sum of squares) for `left`/`right`,
     /// skipping the first `skip` output samples (the upmix latency is added automatically).
+    /// Both renderers share the upmix.
     public static func upmixEnergies(left: [Float], right: [Float], sampleRate: Double = 48000,
-                                     settings: UpmixSettings, renderer: Renderer, skip: Int = 0) -> [(speaker: String, energy: Double)] {
+                                     settings: UpmixSettings, skip: Int = 0) -> [(speaker: String, energy: Double)] {
         let up = Upmixer(sampleRate: sampleRate, settings: settings)
-        up.coherentSteering = renderer == .refined
         let block = 512
         let outs = (0..<Upmixer.outputCount).map { _ in makeBuffer(block) }
         let table = UnsafeMutablePointer<UnsafeMutablePointer<Float>>.allocate(capacity: outs.count)
@@ -57,24 +57,18 @@ public enum Diagnostics {
         let total = Int(seconds * sampleRate)
         let head = HeadRenderer(speakers: [speaker], sampleRate: sampleRate, maxFrames: block, renderer: renderer)
         let classicRoom = Room(sampleRate: sampleRate)
-        let refinedRoom = RefinedRoom(sampleRate: sampleRate, maxFrames: block, groups: head.groupDirections)
+        let refinedRoom = RefinedRoom(sampleRate: sampleRate)
         refinedRoom.muteEarly = part == .late
         refinedRoom.muteLate = part == .early
         refinedRoom.configure(size: settings.size)
         refinedRoom.tune(settings)
-        let groups = max(head.groupDirections.count, 1)
-        let sends = UnsafeMutablePointer<UnsafeMutablePointer<Float>>.allocate(capacity: groups)
-        for g in 0..<groups { sends[g] = makeBuffer(block) }
-        let active = UnsafeMutablePointer<Bool>.allocate(capacity: groups)
-        active.initialize(repeating: false, count: groups)
         let feeds = UnsafeMutablePointer<UnsafeMutablePointer<Float>?>.allocate(capacity: Layout.loopback.count)
         feeds.initialize(repeating: nil, count: Layout.loopback.count)
         let x = makeBuffer(block)
         let dl = makeBuffer(block), dr = makeBuffer(block), rl = makeBuffer(block), rr = makeBuffer(block)
         let sl = makeBuffer(block), sr = makeBuffer(block)
         defer {
-            for g in 0..<groups { sends[g].deallocate() }
-            sends.deallocate(); active.deallocate(); feeds.deallocate()
+            feeds.deallocate()
             for p in [x, dl, dr, rl, rr, sl, sr] { p.deallocate() }
         }
         var direct: [[Float]] = [[], []], room: [[Float]] = [[], []]
@@ -87,11 +81,9 @@ public enum Diagnostics {
             feeds[speaker.rawValue] = x
             for p in [dl, dr, rl, rr, sl, sr] { vDSP_vclr(p, 1, vDSP_Length(n)) }
             head.process(feeds: feeds, frames: n, direct: directGain, send: send, dry: mode == .off,
-                         outL: dl, outR: dr, sendL: sl, sendR: sr,
-                         groupSends: renderer == .refined ? UnsafePointer(sends) : nil,
-                         groupActive: renderer == .refined ? active : nil)
+                         outL: dl, outR: dr, sendL: sl, sendR: sr)
             if renderer == .refined {
-                refinedRoom.process(groupSends: sends, groupActive: active, sendL: sl, sendR: sr, addingTo: rl, rr, frames: n)
+                refinedRoom.process(sendL: sl, sendR: sr, lfe: nil, addingTo: rl, rr, frames: n)
             } else {
                 classicRoom.process(sendL: sl, sendR: sr, addingTo: rl, rr, frames: n, renderer: .classic)
             }
@@ -132,25 +124,9 @@ public enum Diagnostics {
         }
     }
 
-    /// Magnitude (dB) of the elevation filter at `frequency` for a source at `elevation`.
-    public static func elevationGain(elevation: Double, frequency: Double, renderer: Renderer, sampleRate: Double = 48000) -> Double {
-        let filters: [Biquad]
-        if renderer == .refined {
-            let (a, b) = Cue.elevationFilters(elevation: elevation, sampleRate: sampleRate)
-            filters = [a, b]
-        } else {
-            let gain = Cue(azimuth: 0, elevation: elevation, sampleRate: sampleRate, renderer: .classic).notchGainDB
-            filters = [.peaking(8200, gainDB: gain, q: 1.3, sampleRate: sampleRate)]
-        }
-        return filters.reduce(0) { $0 + 20 * log10($1.magnitude(at: frequency, sampleRate: sampleRate)) }
-    }
-
-    /// The Refined room's early reflections for one speaker: per ear, delay (samples), gain and
-    /// whether it arrives from above or below the ear plane.
-    public static func refinedReflections(speaker: Speaker, size: RoomSize = .medium, sampleRate: Double = 48000)
-        -> [(ear: Int, delay: Int, gain: Float, above: Bool, below: Bool)] {
-        let head = HeadRenderer(speakers: [speaker], sampleRate: sampleRate, maxFrames: 64, renderer: .refined)
-        return RefinedRoom(sampleRate: sampleRate, maxFrames: 64, groups: head.groupDirections).taps(group: 0, size: size)
+    /// The Refined room's early reflections in a room size: near-ear delay in ms, in order.
+    public static func refinedReflectionDelays(size: RoomSize, sampleRate: Double = 48000) -> [Double] {
+        RefinedRoom(sampleRate: sampleRate).reflectionDelays(size: size).map { Double($0.near) / sampleRate * 1000 }
     }
 
     /// Energy of a binaural response in the octave band around `center` (Hz).
