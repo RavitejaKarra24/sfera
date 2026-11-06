@@ -19,6 +19,7 @@ enum Probe {
         if args.contains("--surround-probe") { surroundProbe(); return true }
         if args.contains("--tap-probe") { tapProbe(); return true }
         if args.contains("--route-probe") { MainActor.assumeIsolated { routeProbe() }; return true }
+        if let seconds = value("--watch-probe") { MainActor.assumeIsolated { watchProbe(seconds: Double(seconds) ?? 20) }; return true }
         if let seconds = value("--cpu-probe") { cpuProbe(seconds: Double(seconds) ?? 10); return true }
         return false
     }
@@ -78,12 +79,16 @@ enum Probe {
         }
         print("surround-probe: \(Devices.name(loop)) → \(Devices.name(out)) · microphone permission: \(permission)")
 
+        // Sfera parks BlackHole's slider at −32 dB; the tones must arrive at full level.
+        let loopVolume = Devices.volumeScalar(loop)
+        Devices.setVolume(1, unmute: loop)
         var settings = LiveSettings()
         settings.outputGainDB = -90
         let channels = min(16, Devices.channels(loop, scope: kAudioObjectPropertyScopeInput))
         let recorder = ProbeRecorder(channels: channels, frames: 48000 * 4)
         let session: Session
         do { session = try Session(source: .loopback(loop), output: out, settings: settings, probe: recorder) } catch {
+            if let loopVolume { Devices.setVolume(loopVolume, unmute: loop) }
             print("surround-probe: FAILED to start · \(error.localizedDescription)"); exit(1)
         }
         let rate = session.sampleRate
@@ -107,6 +112,7 @@ enum Probe {
             }
         }
         guard status == noErr, let writer, AudioDeviceStart(loop, writer) == noErr else {
+            if let loopVolume { Devices.setVolume(loopVolume, unmute: loop) }
             print("surround-probe: couldn't play into \(Devices.name(loop)) (\(status))"); exit(1)
         }
         let started = Date()
@@ -117,6 +123,7 @@ enum Probe {
         AudioDeviceStop(loop, writer)
         AudioDeviceDestroyIOProcID(loop, writer)
         session.stop()
+        if let loopVolume { Devices.setVolume(loopVolume, unmute: loop) }
 
         // Last second of the recording: which tone dominates each channel (Goertzel)?
         let n = recorder.frames
@@ -149,6 +156,33 @@ enum Probe {
     }
 
     // MARK: Routing
+
+    /// Turns Sfera on as the app would (audible, your saved settings untouched) and prints
+    /// what the route is doing twice a second: which device the Mac plays to, what Sfera
+    /// reads and plays to, whether the IOProc runs and whether sound arrives.
+    @MainActor
+    static func watchProbe(seconds: Double) {
+        let model = Controller(persisting: false)
+        func rate(_ d: AudioDeviceID?) -> String { d.map { "\(Int(Devices.nominalRate($0)))" } ?? "-" }
+        let loop = Devices.loopback()
+        model.launch()
+        let start = Date()
+        var cycles = 0
+        while Date().timeIntervalSince(start) < seconds {
+            RunLoop.main.run(until: Date().addingTimeInterval(0.5))
+            let mac = Devices.defaultOutput()
+            let io = model.ioCycles
+            print(String(format: "%5.1fs  Mac→%@ (%@ Hz) · BH %@ Hz · Sfera %@→%@ · IO %@ · in %.4f · %@ — %@",
+                         Date().timeIntervalSince(start), mac.map(Devices.name) ?? "none", rate(mac), rate(loop),
+                         "\(model.route)", model.sessionOutput.map(Devices.name) ?? "nothing",
+                         io > cycles ? "+\(io - cycles)" : "STOPPED", model.sessionInputPeak, model.headline, model.detail))
+            fflush(stdout)
+            cycles = io
+        }
+        model.shutdown()
+        RunLoop.main.run(until: Date().addingTimeInterval(0.5))
+        print("watch-probe: done · Mac → \(Devices.defaultOutput().map(Devices.name) ?? "none")")
+    }
 
     /// Drives the real Controller (output at −90 dB) through the Sound-menu cases:
     /// start → pick your headphones → pick BlackHole → stop. Restores the Mac's output and

@@ -75,6 +75,8 @@ final class Controller {
     var ioCycles: Int { session?.callbacks ?? 0 }
     /// The device Sfera is playing to (probes).
     var sessionOutput: AudioDeviceID? { session?.output }
+    /// Peak of what the running session reads from its source (probes).
+    var sessionInputPeak: Float { session?.spatializer.inputPeak ?? 0 }
     @ObservationIgnored private var listeners: [Devices.Listener] = []
     @ObservationIgnored private var routeListeners: [Devices.Listener] = []
     @ObservationIgnored private var timer: Timer?

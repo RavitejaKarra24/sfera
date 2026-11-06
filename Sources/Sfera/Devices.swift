@@ -89,6 +89,12 @@ enum Devices {
         return channels(device, scope: kAudioObjectPropertyScopeOutput) >= 1
     }
 
+    /// Bluetooth (and AirPlay) outputs: their clock can't drive the session.
+    static func isWireless(_ device: AudioDeviceID) -> Bool {
+        [kAudioDeviceTransportTypeBluetooth, kAudioDeviceTransportTypeBluetoothLE,
+         kAudioDeviceTransportTypeAirPlay].contains(transport(device))
+    }
+
     static func physicalOutputs() -> [AudioDeviceID] { all().filter(isPhysicalOutput) }
 
     // MARK: Default output

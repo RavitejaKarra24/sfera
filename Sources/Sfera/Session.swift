@@ -158,10 +158,16 @@ final class Session: @unchecked Sendable {
             Devices.setNominalRate(rate, device: loop)
             aggregate[kAudioAggregateDeviceNameKey] = "Sfera"
             aggregate[kAudioAggregateDeviceUIDKey] = "dev.sfera.session.\(UUID().uuidString)"
-            aggregate[kAudioAggregateDeviceMainSubDeviceKey] = outputUID
+            // Who clocks the session. A wired DAC does (its output is never resampled) and
+            // BlackHole follows it. A Bluetooth headphone's clock is too unsteady for that:
+            // after a few seconds the aggregate's read position in BlackHole slides off the
+            // part the player writes and Sfera reads silence (seen with WH-1000XM5). There
+            // BlackHole clocks it and the headphones follow; the stream is re-encoded anyway.
+            let loopbackClocks = Devices.isWireless(output)
+            aggregate[kAudioAggregateDeviceMainSubDeviceKey] = loopbackClocks ? loopUID : outputUID
             aggregate[kAudioAggregateDeviceSubDeviceListKey] = [
-                [kAudioSubDeviceUIDKey: outputUID],
-                [kAudioSubDeviceUIDKey: loopUID, kAudioSubDeviceDriftCompensationKey: 1],
+                [kAudioSubDeviceUIDKey: outputUID, kAudioSubDeviceDriftCompensationKey: loopbackClocks ? 1 : 0],
+                [kAudioSubDeviceUIDKey: loopUID, kAudioSubDeviceDriftCompensationKey: loopbackClocks ? 0 : 1],
             ]
 
         case .tap:
