@@ -1,3 +1,4 @@
+import AppKit
 import CoreAudio
 import Foundation
 
@@ -60,6 +61,34 @@ enum Devices {
         var size: UInt32 = 0
         guard AudioObjectGetPropertyDataSize(device, &a, 0, nil, &size) == noErr else { return 0 }
         return Int(size) / MemoryLayout<AudioStreamID>.size
+    }
+
+    private static func objects(_ object: AudioObjectID, _ selector: AudioObjectPropertySelector,
+                                _ scope: AudioObjectPropertyScope = kAudioObjectPropertyScopeGlobal) -> [AudioObjectID] {
+        var a = address(selector, scope)
+        var size: UInt32 = 0
+        guard AudioObjectGetPropertyDataSize(object, &a, 0, nil, &size) == noErr, size > 0 else { return [] }
+        var ids = [AudioObjectID](repeating: 0, count: Int(size) / MemoryLayout<AudioObjectID>.size)
+        guard AudioObjectGetPropertyData(object, &a, 0, nil, &size, &ids) == noErr else { return [] }
+        return Array(ids.prefix(Int(size) / MemoryLayout<AudioObjectID>.size))
+    }
+
+    // MARK: Other renderers
+
+    /// Other apps reading `device` right now (another renderer such as Downmix): running
+    /// input IO on it directly or through an aggregate. Sfera itself is left out.
+    static func otherCapturers(of device: AudioDeviceID) -> [String] {
+        let me = ProcessInfo.processInfo.processIdentifier
+        return objects(system, kAudioHardwarePropertyProcessObjectList).compactMap { process in
+            guard let pid = uint32(process, kAudioProcessPropertyPID).map({ pid_t(bitPattern: $0) }),
+                  pid > 0, pid != me, uint32(process, kAudioProcessPropertyIsRunningInput) == 1 else { return nil }
+            let inputs = objects(process, kAudioProcessPropertyDevices, kAudioObjectPropertyScopeInput)
+            guard inputs.contains(where: {
+                $0 == device || objects($0, kAudioAggregateDevicePropertyActiveSubDeviceList).contains(device)
+            }) else { return nil }
+            return NSRunningApplication(processIdentifier: pid)?.localizedName
+                ?? string(process, kAudioProcessPropertyBundleID) ?? "another app"
+        }
     }
 
     // MARK: Kinds

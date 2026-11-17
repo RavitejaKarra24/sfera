@@ -110,6 +110,9 @@ final class Controller {
         static let settings = "listen.settings", autostart = "listen.autostart", loopback = "listen.useLoopback"
         /// Device to hand the Mac's output back to (also after a crash).
         static let restore = "listen.restoreOutputUID"
+        /// BlackHole's volume before Sfera set it to the middle (also after a crash). The
+        /// slider is shared: another app reading BlackHole (Downmix) hears it too.
+        static let restoreVolume = "listen.restoreLoopbackVolume"
         static let lastOutput = "listen.outputUID"
     }
 
@@ -140,7 +143,18 @@ final class Controller {
             Devices.onDefaultOutputChange { [weak self] in Task { @MainActor in self?.defaultOutputChanged() } },
             Devices.onDeviceListChange { [weak self] in Task { @MainActor in self?.deviceListChanged() } },
         ].compactMap { $0 }
-        if listenOnLaunch { start() } else { restoreMacOutput() }   // e.g. after a crash on BlackHole
+        // Another renderer (e.g. Downmix) already reading BlackHole: listening too would play
+        // both mixes at once, and taking the Mac's output back would cut it off.
+        if listenOnLaunch, let loop = Devices.loopback(), case let others = Devices.otherCapturers(of: loop), !others.isEmpty {
+            let who = ListFormatter.localizedString(byJoining: others)
+            Log.write("not listening on launch: \(who) is using \(Devices.name(loop))")
+            errorMessage = "\(who) is using \(Devices.name(loop)). Turn it off, then turn Sfera on."
+            return
+        }
+        if listenOnLaunch { start() } else {   // e.g. after a crash on BlackHole
+            restoreMacOutput()
+            restoreLoopbackVolume()
+        }
     }
 
     /// App is quitting: hand the Mac's output back, and give the session up to 2 s to close.
@@ -238,6 +252,7 @@ final class Controller {
         watchdogRestarts = 0
         teardown()
         restoreMacOutput()
+        restoreLoopbackVolume()
         scheduleTimer()
     }
 
@@ -358,7 +373,13 @@ final class Controller {
         case (.loopback(let loop, let out, let setVolume), .success(let session)):
             self.session = session
             session.update(settings)
-            if setVolume { Devices.setVolume(Self.loopbackStartVolume, unmute: loop) }
+            if setVolume {
+                let d = UserDefaults.standard
+                if d.object(forKey: Key.restoreVolume) == nil, let current = Devices.volumeScalar(loop) {
+                    d.set(current, forKey: Key.restoreVolume)
+                }
+                Devices.setVolume(Self.loopbackStartVolume, unmute: loop)
+            }
             route = .loopback
             began(output: out)
             routeListeners += [
@@ -405,13 +426,31 @@ final class Controller {
     }
 
     /// Hands the Mac's output back to the real device if Sfera left it on the loopback.
+    /// Not while another app (e.g. Downmix) is reading the loopback: it owns the route now
+    /// and hands the output back itself; switching away would cut it off.
     private func restoreMacOutput() {
         let d = UserDefaults.standard
         guard let uid = d.string(forKey: Key.restore) else { return }
-        if let current = Devices.defaultOutput(), Devices.isLoopback(current), let device = Devices.device(uid: uid) {
-            Devices.setDefaultOutput(device)
-        }
         d.removeObject(forKey: Key.restore)
+        guard let current = Devices.defaultOutput(), Devices.isLoopback(current), let device = Devices.device(uid: uid) else { return }
+        let others = Devices.otherCapturers(of: current)
+        guard others.isEmpty else {
+            Log.write("left the Mac's output on \(Devices.name(current)): \(others.joined(separator: ", ")) is using it")
+            return
+        }
+        Devices.setDefaultOutput(device)
+    }
+
+    /// Puts BlackHole's volume back to where it was before Sfera set it to the middle, so
+    /// the next app reading BlackHole doesn't get Sfera's −32 dB.
+    private func restoreLoopbackVolume() {
+        let d = UserDefaults.standard
+        guard d.object(forKey: Key.restoreVolume) != nil else { return }
+        let volume = d.float(forKey: Key.restoreVolume)
+        d.removeObject(forKey: Key.restoreVolume)
+        guard let loop = Devices.loopback() else { return }
+        Devices.setVolume(volume, unmute: loop)
+        Log.write(String(format: "BlackHole volume back to %.0f %%", volume * 100))
     }
 
     // MARK: - Events
